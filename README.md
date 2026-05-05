@@ -41,8 +41,8 @@ pnpm add medusa-payment-redsys
 Add the following to your `.env` file:
 
 ```env
-REDSYS_SECRET_KEY=sq7HjrUOBfKmC576ILgskD5srU870gJ7
-REDSYS_MERCHANT_CODE=352468805
+REDSYS_SECRET_KEY=sq7Hj....
+REDSYS_MERCHANT_CODE=999008881
 REDSYS_TERMINAL=001
 REDSYS_ENVIRONMENT=sandbox
 REDSYS_NOTIFICATION_URL=https://your-api.com/hooks/payment/redsys_redsys
@@ -55,7 +55,7 @@ For sandbox testing, use the following test credentials from Redsys:
 ```
 Merchant Code: 999008881
 Terminal: 001
-Secret Key: sq7HjrUOBfKmC576ILgskD5srU870gJ7
+Secret Key: sq7Hj.......
 Environment: sandbox
 ```
 
