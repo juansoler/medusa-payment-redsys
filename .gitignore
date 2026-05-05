@@ -1,0 +1,12 @@
+node_modules/
+.medusa/
+dist/
+.env
+.env.local
+.env.*.local
+*.log
+.DS_Store
+*.tsbuildinfo
+coverage/
+.nyc_output/
+.turbo/

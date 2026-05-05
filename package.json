@@ -1,0 +1,63 @@
+{
+  "name": "medusa-payment-redsys",
+  "version": "1.0.0",
+  "description": "Redsys / Sermepa TPV Virtual payment provider plugin for MedusaJS v2",
+  "author": "Juan Soler Márquez",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/juansoler/medusa-payment-redsys.git"
+  },
+  "homepage": "https://github.com/juansoler/medusa-payment-redsys",
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    ".medusa/server"
+  ],
+  "exports": {
+    "./package.json": "./package.json",
+    "./providers/*": "./.medusa/server/src/providers/*/index.js",
+    "./*": "./.medusa/server/src/*.js"
+  },
+  "keywords": [
+    "medusa",
+    "medusa-v2",
+    "medusa-plugin",
+    "medusa-plugin-payment",
+    "medusa-plugin-integration",
+    "redsys",
+    "sermepa",
+    "tpv",
+    "tpv-virtual",
+    "payment",
+    "spain",
+    "ecommerce"
+  ],
+  "scripts": {
+    "build": "medusa plugin:build",
+    "dev": "medusa plugin:develop",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "medusa plugin:build"
+  },
+  "dependencies": {
+    "redsys-easy": "^5.3.0"
+  },
+  "peerDependencies": {
+    "@medusajs/framework": "^2.13.0",
+    "@medusajs/medusa": "^2.13.0"
+  },
+  "devDependencies": {
+    "@medusajs/cli": "^2.13.0",
+    "@medusajs/framework": "^2.13.0",
+    "@medusajs/medusa": "^2.13.0",
+    "@medusajs/types": "^2.13.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.6.2",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
