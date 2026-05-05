@@ -3,10 +3,31 @@ import {
   MedusaError,
   PaymentActions,
   PaymentSessionStatus,
-  isPresent,
 } from "@medusajs/framework/utils"
 import { createRedsysAPI, SANDBOX_URLS, PRODUCTION_URLS } from "redsys-easy"
 import type { Logger } from "@medusajs/medusa"
+import type {
+  InitiatePaymentInput,
+  InitiatePaymentOutput,
+  AuthorizePaymentInput,
+  AuthorizePaymentOutput,
+  CapturePaymentInput,
+  CapturePaymentOutput,
+  CancelPaymentInput,
+  CancelPaymentOutput,
+  RefundPaymentInput,
+  RefundPaymentOutput,
+  GetPaymentStatusInput,
+  GetPaymentStatusOutput,
+  RetrievePaymentInput,
+  RetrievePaymentOutput,
+  UpdatePaymentInput,
+  UpdatePaymentOutput,
+  DeletePaymentInput,
+  DeletePaymentOutput,
+  ProviderWebhookPayload,
+  WebhookActionResult,
+} from "@medusajs/types"
 
 import type {
   RedsysOptions,
@@ -17,91 +38,6 @@ import { getSmallestUnit } from "../../utils/amount"
 import { getCurrencyNum } from "../../utils/currency"
 import { generateOrderId } from "../../utils/order-id"
 import { getErrorMessage } from "../../utils/errors"
-
-// ---------------------------------------------------------------------------
-// Type definitions (mirrors @medusajs/types payment provider interface,
-// avoiding missing .d.ts files in certain @medusajs/types distributions)
-// ---------------------------------------------------------------------------
-
-interface InitiatePaymentInput {
-  amount: number
-  currency_code: string
-  data: Record<string, unknown>
-  context: Record<string, unknown>
-}
-interface InitiatePaymentOutput {
-  id?: string
-  data: Record<string, unknown>
-}
-interface AuthorizePaymentInput {
-  data: Record<string, unknown>
-}
-interface AuthorizePaymentOutput {
-  status: PaymentSessionStatus
-  data: Record<string, unknown>
-}
-interface CapturePaymentInput {
-  data: Record<string, unknown>
-}
-interface CapturePaymentOutput {
-  data: Record<string, unknown>
-}
-interface CancelPaymentInput {
-  data: Record<string, unknown>
-}
-interface CancelPaymentOutput {
-  data: Record<string, unknown>
-}
-interface RefundPaymentInput {
-  amount: number
-  data: Record<string, unknown>
-}
-interface RefundPaymentOutput {
-  data: Record<string, unknown>
-}
-interface GetPaymentStatusInput {
-  data: Record<string, unknown>
-}
-interface GetPaymentStatusOutput {
-  status: PaymentSessionStatus
-  data?: Record<string, unknown>
-}
-interface RetrievePaymentInput {
-  data: Record<string, unknown>
-}
-interface RetrievePaymentOutput {
-  data: Record<string, unknown>
-}
-interface UpdatePaymentInput {
-  amount: number
-  currency_code: string
-  data: Record<string, unknown>
-  context: Record<string, unknown>
-}
-interface UpdatePaymentOutput {
-  data: Record<string, unknown>
-}
-interface DeletePaymentInput {
-  data: Record<string, unknown>
-}
-interface DeletePaymentOutput {
-  data?: Record<string, unknown>
-}
-interface ProviderWebhookPayload {
-  payload: {
-    data: Record<string, unknown>
-    rawData?: string | Buffer
-    headers?: Record<string, string>
-  }
-}
-interface WebhookActionResult {
-  action: string
-  data?: Record<string, unknown>
-}
-
-// ---------------------------------------------------------------------------
-// Provider service
-// ---------------------------------------------------------------------------
 
 type InjectedDependencies = {
   logger: Logger
@@ -213,13 +149,13 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
     if (sessionData?.status === "authorized") {
       return {
         status: PaymentSessionStatus.AUTHORIZED,
-        data: input.data,
+        data: input.data as Record<string, unknown>,
       }
     }
 
     return {
       status: PaymentSessionStatus.PENDING,
-      data: input.data,
+      data: input.data as Record<string, unknown>,
     }
   }
 
@@ -232,14 +168,14 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
       input.data as unknown as RedsysPaymentSessionData | undefined
 
     if (!sessionData?.orderId) {
-      return { data: input.data }
+      return { data: input.data as Record<string, unknown> | undefined }
     }
 
     const transactionType =
       sessionData.transactionType || DEFAULTS.transactionType
 
     if (transactionType !== "1") {
-      return { data: input.data }
+      return { data: input.data as Record<string, unknown> | undefined }
     }
 
     const params: Record<string, string> = {
@@ -282,11 +218,11 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
       input.data as unknown as RedsysPaymentSessionData | undefined
 
     if (!sessionData?.orderId) {
-      return { data: input.data }
+      return { data: input.data as Record<string, unknown> | undefined }
     }
 
     if (sessionData.status === "cancelled") {
-      return { data: input.data }
+      return { data: input.data as Record<string, unknown> | undefined }
     }
 
     const params: Record<string, string> = {
@@ -329,7 +265,7 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
       input.data as unknown as RedsysPaymentSessionData | undefined
 
     if (!sessionData?.orderId) {
-      return { data: input.data }
+      return { data: input.data as Record<string, unknown> | undefined }
     }
 
     const refundAmount = this.assertPositiveAmount(input.amount)
@@ -411,7 +347,7 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
   async retrievePayment(
     input: RetrievePaymentInput
   ): Promise<RetrievePaymentOutput> {
-    return { data: input.data }
+    return { data: input.data as Record<string, unknown> | undefined }
   }
 
   // ---------- Update ----------
@@ -519,12 +455,8 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
         return {
           action: PaymentActions.SUCCESSFUL,
           data: {
-            session_id: sessionId,
-            orderId,
-            authCode: (notification as any).Ds_AuthorisationCode,
-            responseCode: dsResponse,
-            amount: (notification as any).Ds_Amount,
-            currency: (notification as any).Ds_Currency,
+            session_id: sessionId || "",
+            amount: (notification as any).Ds_Amount || 0,
           },
         }
       }
@@ -538,10 +470,6 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
 
       return {
         action: PaymentActions.FAILED,
-        data: {
-          orderId: (notification as any).Ds_Order,
-          responseCode: dsResponse,
-        },
       }
     } catch (error) {
       this.logger_.error(

@@ -316,9 +316,8 @@ describe("RedsysProviderService", () => {
       } as any)
 
       expect(result.action).toBe("captured")
-      expect(result.data?.orderId).toBe("1234ABCD5678")
       expect(result.data?.session_id).toBe("ps_session_1")
-      expect(result.data?.authCode).toBe("AUTH123")
+      expect(result.data?.amount).toBe("2550")
     })
 
     it("returns FAILED for declined payment", async () => {
