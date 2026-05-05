@@ -88,6 +88,7 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
     input: InitiatePaymentInput
   ): Promise<InitiatePaymentOutput> {
     const orderId = generateOrderId()
+    const sessionId = "redsys_" + orderId
     const amount = this.assertPositiveAmount(input.amount)
     const amountStr = String(getSmallestUnit(amount, input.currency_code))
     const currencyNum = getCurrencyNum(input.currency_code)
@@ -107,12 +108,19 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
     if (this.options_.notificationUrl) {
       merchantParams.DS_MERCHANT_MERCHANTURL = this.options_.notificationUrl
     }
+
+    const separator = (url: string) => url.includes("?") ? "&" : "?"
+
     if (this.options_.successUrl) {
-      merchantParams.DS_MERCHANT_URLOK = this.options_.successUrl
+      merchantParams.DS_MERCHANT_URLOK =
+        this.options_.successUrl + separator(this.options_.successUrl) + "orderId=" + orderId
     }
     if (this.options_.errorUrl) {
-      merchantParams.DS_MERCHANT_URLKO = this.options_.errorUrl
+      merchantParams.DS_MERCHANT_URLKO =
+        this.options_.errorUrl + separator(this.options_.errorUrl) + "orderId=" + orderId
     }
+
+    merchantParams.DS_MERCHANT_MERCHANTDATA = sessionId + "|" + orderId
 
     const form = await this.redsysApi.createRedirectForm(
       merchantParams as any
@@ -133,7 +141,7 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
     this.logger_.info("[REDSYS] Redirect form created for order: " + orderId)
 
     return {
-      id: "redsys_" + orderId,
+      id: sessionId,
       data: sessionData as unknown as Record<string, unknown>,
     }
   }
@@ -146,7 +154,10 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
     const sessionData =
       input.data as unknown as RedsysPaymentSessionData | undefined
 
-    if (sessionData?.status === "authorized") {
+    if (
+      sessionData?.status === "authorized" ||
+      sessionData?.status === "pending"
+    ) {
       return {
         status: PaymentSessionStatus.AUTHORIZED,
         data: input.data as Record<string, unknown>,
@@ -358,6 +369,7 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
     const sessionData =
       input.data as unknown as RedsysPaymentSessionData | undefined
     const orderId = sessionData?.orderId || generateOrderId()
+    const sessionId = "redsys_" + orderId
     const amount = this.assertPositiveAmount(input.amount)
     const amountStr = String(getSmallestUnit(amount, input.currency_code))
     const currencyNum = getCurrencyNum(input.currency_code)
@@ -377,12 +389,19 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
     if (this.options_.notificationUrl) {
       merchantParams.DS_MERCHANT_MERCHANTURL = this.options_.notificationUrl
     }
+
+    const separator = (url: string) => url.includes("?") ? "&" : "?"
+
     if (this.options_.successUrl) {
-      merchantParams.DS_MERCHANT_URLOK = this.options_.successUrl
+      merchantParams.DS_MERCHANT_URLOK =
+        this.options_.successUrl + separator(this.options_.successUrl) + "orderId=" + orderId
     }
     if (this.options_.errorUrl) {
-      merchantParams.DS_MERCHANT_URLKO = this.options_.errorUrl
+      merchantParams.DS_MERCHANT_URLKO =
+        this.options_.errorUrl + separator(this.options_.errorUrl) + "orderId=" + orderId
     }
+
+    merchantParams.DS_MERCHANT_MERCHANTDATA = sessionId + "|" + orderId
 
     const form = await this.redsysApi.createRedirectForm(
       merchantParams as any
@@ -455,7 +474,7 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
         return {
           action: PaymentActions.SUCCESSFUL,
           data: {
-            session_id: sessionId || "",
+            session_id: sessionId || "redsys_" + orderId,
             amount: (notification as any).Ds_Amount || 0,
           },
         }

@@ -122,46 +122,280 @@ pp_redsys_redsys
 
 1. Customer selects **Redsys** as payment method
 2. `initiatePayment()` creates a signed redirect form with Redsys merchant parameters
-3. Storefront renders the auto-submitting form → customer is redirected to Redsys' secure TPV
+3. Customer clicks "Place Order" → storefront calls `cart.complete()` to create the order, then auto-submits the redirect form to Redsys TPV
 4. Customer completes payment on the Redsys hosted payment page
 5. Redsys sends a **webhook notification** to `{backendUrl}/hooks/payment/redsys_redsys`
 6. `getWebhookActionAndData()` validates the HMAC-SHA256 signature and updates the payment status
 7. Redsys redirects the customer's browser to `successUrl` or `errorUrl`
 
-### Storefront Integration
+### Important: authorizePayment Behavior
 
-The payment session data returned by `initiatePayment` contains the fields needed to build the redirect form:
+This plugin's `authorizePayment` returns `AUTHORIZED` for sessions with status `"pending"` **and** `"authorized"`. This is intentional for the redirect flow: the real authorization happens on Redsys TPV and is confirmed via webhook. Without this, `cart.complete()` would fail with a 400 error because Medusa requires the payment session to be authorized before completing the cart.
+
+## Storefront Integration
+
+Redsys is a **redirect-based** payment method (no card input in your storefront — the customer enters card data on Redsys' secure TPV). You must adapt your Medusa Next.js storefront with the changes below.
+
+### 1. `src/lib/constants.tsx` — Register the payment method
+
+Add Redsys to the payment info map and add a helper function:
+
+```tsx
+// Inside paymentInfoMap, add:
+pp_redsys_redsys: {
+  title: "Credit / Debit Card",
+  icon: <CreditCard />,
+},
+
+// Add helper function:
+export const isRedsys = (providerId?: string) => {
+  return providerId?.startsWith("pp_redsys_")
+}
+```
+
+### 2. `src/lib/data/cart.ts` — Add order completion without redirect
+
+Add a `completeCartWithoutRedirect` function. The standard `placeOrder` does a `redirect()` (server-side), but Redsys needs to redirect the browser to the TPV instead. This function completes the cart, creates the order, but returns the result so the client can handle the TPV redirect:
 
 ```ts
-// Session data returned by the provider:
+export async function completeCartWithoutRedirect(cartId?: string) {
+  const id = cartId || (await getCartId())
+
+  if (!id) {
+    throw new Error("No existing cart found when completing cart")
+  }
+
+  const headers = {
+    ...(await getAuthHeaders()),
+  }
+
+  const cartRes = await sdk.store.cart
+    .complete(id, {}, headers)
+    .then(async (cartRes) => {
+      const cartCacheTag = await getCacheTag("carts")
+      revalidateTag(cartCacheTag)
+      return cartRes
+    })
+    .catch(medusaError)
+
+  if (cartRes?.type === "order") {
+    const orderCacheTag = await getCacheTag("orders")
+    revalidateTag(orderCacheTag)
+    removeCartId()
+  }
+
+  return cartRes
+}
+```
+
+### 3. `src/modules/checkout/components/payment-button/index.tsx` — Redsys payment button
+
+Add a `RedsysPaymentButton` component that:
+1. Reads the payment session data (formUrl, merchantParams, signature) from the cart
+2. Calls `completeCartWithoutRedirect()` to create the order
+3. Dynamically builds and auto-submits a `<form>` to Redsys' TPV
+
+```tsx
+// Add import:
+import { isManual, isRedsys, isStripeLike } from "@lib/constants"
+import { completeCartWithoutRedirect, placeOrder } from "@lib/data/cart"
+
+// Add case in PaymentButton's switch:
+case isRedsys(paymentSession?.provider_id):
+  return (
+    <RedsysPaymentButton
+      notReady={notReady}
+      cart={cart}
+      data-testid={dataTestId}
+    />
+  )
+
+// Add the component:
+const RedsysPaymentButton = ({
+  cart,
+  notReady,
+  "data-testid": dataTestId,
+}: {
+  cart: HttpTypes.StoreCart
+  notReady: boolean
+  "data-testid"?: string
+}) => {
+  const [submitting, setSubmitting] = useState(false)
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
+
+  const handlePayment = async () => {
+    setSubmitting(true)
+
+    const paymentSession = cart.payment_collection?.payment_sessions?.find(
+      (s) => s.status === "pending" && isRedsys(s.provider_id)
+    )
+
+    const redsysData = paymentSession?.data as Record<string, string> | undefined
+
+    if (!redsysData?.formUrl || !redsysData?.merchantParams || !redsysData?.signature) {
+      setErrorMessage("No se pudieron obtener los datos de pago de Redsys")
+      setSubmitting(false)
+      return
+    }
+
+    const cartRes = await completeCartWithoutRedirect()
+      .catch((err) => {
+        setErrorMessage(err.message)
+        setSubmitting(false)
+        return null
+      })
+
+    if (!cartRes || cartRes.type !== "order") {
+      setErrorMessage(cartRes ? "Error al crear el pedido" : "")
+      setSubmitting(false)
+      return
+    }
+
+    const form = document.createElement("form")
+    form.method = "POST"
+    form.action = redsysData.formUrl
+
+    const fields: Record<string, string> = {
+      Ds_SignatureVersion: redsysData.signatureVersion,
+      Ds_MerchantParameters: redsysData.merchantParams,
+      Ds_Signature: redsysData.signature,
+    }
+
+    Object.entries(fields).forEach(([name, value]) => {
+      const input = document.createElement("input")
+      input.type = "hidden"
+      input.name = name
+      input.value = value
+      form.appendChild(input)
+    })
+
+    document.body.appendChild(form)
+    form.submit()
+  }
+
+  return (
+    <>
+      <Button
+        disabled={notReady || submitting}
+        isLoading={submitting}
+        onClick={handlePayment}
+        size="large"
+        data-testid={dataTestId}
+      >
+        Place order
+      </Button>
+      <ErrorMessage
+        error={errorMessage}
+        data-testid="redsys-payment-error-message"
+      />
+    </>
+  )
+}
+```
+
+### 4. `src/app/checkout/redsys-callback/page.tsx` — Callback page (new file)
+
+Create the page Redsys redirects to after payment. It reads the `orderId` query param and redirects to the order confirmation page:
+
+```tsx
+import { retrieveOrder } from "@lib/data/orders"
+import { Metadata } from "next"
+import { redirect } from "next/navigation"
+
+export const metadata: Metadata = {
+  title: "Resultado del pago",
+  description: "Resultado de la operación con Redsys",
+}
+
+type Props = {
+  searchParams: Promise<{ [key: string]: string | undefined }>
+}
+
+export default async function RedsysCallbackPage(props: Props) {
+  const searchParams = await props.searchParams
+  const isError = searchParams.error === "1"
+  const orderId = searchParams.orderId
+
+  if (isError) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[50vh] gap-4 p-8">
+        <h1 className="text-2xl font-bold text-red-600">Pago no completado</h1>
+        <p className="text-gray-600">
+          La operación no se ha completado correctamente.
+        </p>
+        <a href="/" className="mt-4 px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">
+          Volver a la tienda
+        </a>
+      </div>
+    )
+  }
+
+  if (orderId) {
+    try {
+      const order = await retrieveOrder(orderId)
+      if (order) {
+        const countryCode = order.shipping_address?.country_code?.toLowerCase() || "dk"
+        return redirect(`/${countryCode}/order/${orderId}/confirmed`)
+      }
+    } catch {
+      // Order not found, show success anyway
+    }
+  }
+
+  return (
+    <div className="flex flex-col items-center justify-center min-h-[50vh] gap-4 p-8">
+      <h1 className="text-2xl font-bold text-green-600">Pago procesado</h1>
+      <p className="text-gray-600">Tu pago ha sido procesado correctamente.</p>
+      <a href="/" className="mt-4 px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">
+        Volver a la tienda
+      </a>
+    </div>
+  )
+}
+```
+
+### 5. `src/middleware.ts` — Bypass region redirect
+
+If your storefront uses middleware to enforce region/country code prefixes in URLs (as the default Medusa Next.js storefront does), add a bypass so `/checkout/redsys-callback` is not redirected. Add this early in the `middleware` function:
+
+```ts
+// Redsys callback URL — bypass region redirect
+if (request.nextUrl.pathname.startsWith("/checkout/redsys-callback")) {
+  return NextResponse.next()
+}
+```
+
+### 6. `medusa-config.ts` — CORS
+
+Ensure your storefront domain is allowed in CORS:
+
+```ts
+projectConfig: {
+  http: {
+    storeCors: "http://localhost:8000,https://your-store.com",
+  },
+}
+```
+
+### Session Data Reference
+
+The payment session `data` field returned by `initiatePayment`:
+
+```ts
 {
   orderId: "1234ABCD5678",
-  amount: "2550",           // Amount in smallest currency unit (cents)
-  currency: "978",           // Numeric currency code (978 = EUR)
+  amount: "2550",
+  currency: "978",
   status: "pending",
-  merchantParams: "base64...",  // Base64-encoded DS_MERCHANT parameters
-  signature: "hmac...",         // HMAC-SHA256 signature
+  transactionType: "0",
+  merchantParams: "base64...",          // Base64-encoded merchant parameters
+  signature: "hmac...",                 // HMAC-SHA256 signature
   signatureVersion: "HMAC_SHA256_V1",
   formUrl: "https://sis-t.redsys.es:25443/sis/realizarPago"
 }
 ```
 
-Render the redirect form on your storefront:
-
-```html
-<form
-  id="redsys-form"
-  action="https://sis-t.redsys.es:25443/sis/realizarPago"
-  method="POST"
->
-  <input type="hidden" name="Ds_SignatureVersion" value="HMAC_SHA256_V1" />
-  <input type="hidden" name="Ds_MerchantParameters" value="..." />
-  <input type="hidden" name="Ds_Signature" value="..." />
-</form>
-<script>
-  document.getElementById("redsys-form").submit()
-</script>
-```
+These fields are used in step 3 to build the auto-submitting redirect form.
 
 ### Webhook
 
