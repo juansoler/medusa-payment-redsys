@@ -1,4 +1,4 @@
-# medusa-payment-redsys
+# @jsm406/medusa-plugin-redsys
 
 Redsys / Sermepa TPV Virtual payment provider plugin for [MedusaJS v2](https://medusajs.com/).
 
@@ -27,11 +27,11 @@ This plugin enables payment processing through Redsys' hosted payment page (TPV 
 ## Installation
 
 ```bash
-npm install medusa-payment-redsys
+npm install @jsm406/medusa-plugin-redsys
 # or
-yarn add medusa-payment-redsys
+yarn add @jsm406/medusa-plugin-redsys
 # or
-pnpm add medusa-payment-redsys
+pnpm add @jsm406/medusa-plugin-redsys
 ```
 
 ## Configuration
@@ -73,7 +73,7 @@ export default defineConfig({
       options: {
         providers: [
           {
-            resolve: "medusa-payment-redsys/providers/redsys",
+            resolve: "@jsm406/medusa-plugin-redsys/providers/redsys",
             id: "redsys",
             options: {
               secretKey: process.env.REDSYS_SECRET_KEY,
@@ -122,15 +122,22 @@ pp_redsys_redsys
 
 1. Customer selects **Redsys** as payment method
 2. `initiatePayment()` creates a signed redirect form with Redsys merchant parameters
-3. Customer clicks "Place Order" → storefront calls `cart.complete()` to create the order, then auto-submits the redirect form to Redsys TPV
+3. Customer clicks "Place Order" → storefront calls `cart.complete()` to create the order, stores a cookie mapping the Redsys internal order ID to the Medusa order ID, then auto-submits the redirect form to Redsys TPV
 4. Customer completes payment on the Redsys hosted payment page
 5. Redsys sends a **webhook notification** to `{backendUrl}/hooks/payment/redsys_redsys`
 6. `getWebhookActionAndData()` validates the HMAC-SHA256 signature and updates the payment status
-7. Redsys redirects the customer's browser to `successUrl` or `errorUrl`
+7. Redsys redirects the customer's browser to `successUrl` or `errorUrl` with the Redsys order ID as a query parameter
+8. Storefront callback page reads the sessionStorage to resolve the Medusa order ID and redirects to the order confirmation page
 
 ### Important: authorizePayment Behavior
 
 This plugin's `authorizePayment` returns `AUTHORIZED` for sessions with status `"pending"` **and** `"authorized"`. This is intentional for the redirect flow: the real authorization happens on Redsys TPV and is confirmed via webhook. Without this, `cart.complete()` would fail with a 400 error because Medusa requires the payment session to be authorized before completing the cart.
+
+### ID Mapping (Redsys → Medusa)
+
+The plugin generates a 12-character alphanumeric `orderId` (e.g. `97727XYIWRRF`) used as Redsys' merchant order reference. When the order is completed via `cart.complete()`, Medusa generates its own order ID (e.g. `order_01KR3B4X...`). These are **different IDs**.
+
+The callback URL from Redsys only contains the Redsys order ID, not the Medusa order ID. To bridge this gap, the storefront stores the mapping `redsys_map_{redsysOrderId}` → `{ medusaOrderId, countryCode }` in `sessionStorage` before redirecting to the TPV. The callback page reads this value to redirect to the correct order confirmation page.
 
 ## Storefront Integration
 
@@ -193,7 +200,7 @@ export async function completeCartWithoutRedirect(cartId?: string) {
 Add a `RedsysPaymentButton` component that:
 1. Reads the payment session data (formUrl, merchantParams, signature) from the cart
 2. Calls `completeCartWithoutRedirect()` to create the order
-3. Dynamically builds and auto-submits a `<form>` to Redsys' TPV
+3. Stores the Redsys → Medusa order ID mapping in `sessionStorage` (with country code), then builds and auto-submits a `<form>` to Redsys' TPV
 
 ```tsx
 // Add import:
@@ -251,6 +258,16 @@ const RedsysPaymentButton = ({
       return
     }
 
+    // Store Redsys ID → Medusa ID mapping + country code in sessionStorage.
+    // The callback page reads this to redirect to the order confirmation.
+    const medusaOrderId = cartRes.order.id
+    const redsysOrderId = redsysData.orderId || ""
+    const countryCode = cart.shipping_address?.country_code?.toLowerCase() || "dk"
+    sessionStorage.setItem(
+      `redsys_map_${redsysOrderId}`,
+      JSON.stringify({ medusaOrderId, countryCode })
+    )
+
     const form = document.createElement("form")
     form.method = "POST"
     form.action = redsysData.formUrl
@@ -295,28 +312,61 @@ const RedsysPaymentButton = ({
 
 ### 4. `src/app/checkout/redsys-callback/page.tsx` — Callback page (new file)
 
-Create the page Redsys redirects to after payment. It reads the `orderId` query param and redirects to the order confirmation page:
+Create a **client component** page that Redsys redirects to after payment. It reads the `orderId` query param (Redsys internal ID), looks up the real Medusa order ID from `sessionStorage`, and redirects to the order confirmation page:
 
 ```tsx
-import { retrieveOrder } from "@lib/data/orders"
-import { Metadata } from "next"
-import { redirect } from "next/navigation"
+"use client"
 
-export const metadata: Metadata = {
-  title: "Resultado del pago",
-  description: "Resultado de la operación con Redsys",
-}
+import { useRouter, useSearchParams } from "next/navigation"
+import { useEffect, useState } from "react"
 
-type Props = {
-  searchParams: Promise<{ [key: string]: string | undefined }>
-}
+export default function RedsysCallbackPage() {
+  const searchParams = useSearchParams()
+  const router = useRouter()
+  const [status, setStatus] = useState<"loading" | "error" | "success">("loading")
 
-export default async function RedsysCallbackPage(props: Props) {
-  const searchParams = await props.searchParams
-  const isError = searchParams.error === "1"
-  const orderId = searchParams.orderId
+  const isError = searchParams?.get("error") === "1"
+  const redsysOrderId = searchParams?.get("orderId")
 
-  if (isError) {
+  useEffect(() => {
+    if (isError) {
+      setStatus("error")
+      return
+    }
+
+    if (!redsysOrderId) {
+      setStatus("success")
+      return
+    }
+
+    const stored = sessionStorage.getItem(`redsys_map_${redsysOrderId}`)
+
+    if (stored) {
+      let orderData: { medusaOrderId: string; countryCode: string }
+      try {
+        orderData = JSON.parse(stored)
+      } catch {
+        orderData = { medusaOrderId: stored, countryCode: "dk" }
+      }
+      sessionStorage.removeItem(`redsys_map_${redsysOrderId}`)
+      router.replace(
+        `/${orderData.countryCode}/order/${orderData.medusaOrderId}/confirmed`
+      )
+      return
+    }
+
+    setStatus("success")
+  }, [isError, redsysOrderId, router])
+
+  if (status === "loading") {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[50vh] gap-4 p-8">
+        <p className="text-gray-600">Procesando pago...</p>
+      </div>
+    )
+  }
+
+  if (status === "error") {
     return (
       <div className="flex flex-col items-center justify-center min-h-[50vh] gap-4 p-8">
         <h1 className="text-2xl font-bold text-red-600">Pago no completado</h1>
@@ -328,18 +378,6 @@ export default async function RedsysCallbackPage(props: Props) {
         </a>
       </div>
     )
-  }
-
-  if (orderId) {
-    try {
-      const order = await retrieveOrder(orderId)
-      if (order) {
-        const countryCode = order.shipping_address?.country_code?.toLowerCase() || "dk"
-        return redirect(`/${countryCode}/order/${orderId}/confirmed`)
-      }
-    } catch {
-      // Order not found, show success anyway
-    }
   }
 
   return (
@@ -464,7 +502,7 @@ npm run dev
 npm run dev
 
 # In your Medusa project directory:
-npx medusa plugin:add ../path-to/medusa-payment-redsys
+npx medusa plugin:add ../path-to/@jsm406/medusa-plugin-redsys
 ```
 
 ## License
@@ -473,4 +511,4 @@ MIT — see [LICENSE](./LICENSE) file for details.
 
 ## Support
 
-For issues and questions, please open an issue on [GitHub](https://github.com/juansoler/medusa-payment-redsys/issues).
+For issues and questions, please open an issue on [GitHub](https://github.com/juansoler/medusa-plugin-redsys/issues).

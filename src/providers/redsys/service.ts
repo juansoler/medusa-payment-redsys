@@ -146,7 +146,7 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
     }
   }
 
-  // ---------- Authorize ----------
+// ---------- Authorize ----------
 
   async authorizePayment(
     input: AuthorizePaymentInput
