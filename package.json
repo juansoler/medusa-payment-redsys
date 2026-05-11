@@ -1,6 +1,6 @@
 {
   "name": "@jsm406/medusa-plugin-redsys",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Redsys / Sermepa TPV Virtual payment provider plugin for MedusaJS v2",
   "author": "Juan Soler Márquez",
   "license": "MIT",
