@@ -95,6 +95,13 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
     const transactionType =
       this.options_.transactionType || DEFAULTS.transactionType
 
+    const context = (input.context || {}) as Record<string, unknown>
+    const cartId = (context.cart_id as string) || ""
+    const countryCode =
+      (context.country_code as string) ||
+      ((context.shipping_address as Record<string, unknown>)?.country_code as string) ||
+      ""
+
     const merchantParams: Record<string, string> = {
       DS_MERCHANT_MERCHANTCODE: this.options_.merchantCode,
       DS_MERCHANT_TERMINAL: this.options_.terminal || DEFAULTS.terminal,
@@ -110,17 +117,34 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
     }
 
     const separator = (url: string) => url.includes("?") ? "&" : "?"
+    const supportedCountryCodes = ["es", "en", "pt", "fr", "de", "it"]
 
     if (this.options_.successUrl) {
+      let url = this.options_.successUrl
+      if (countryCode && supportedCountryCodes.includes(countryCode)) {
+        url = url.replace("/checkout/", "/" + countryCode + "/checkout/")
+      }
       merchantParams.DS_MERCHANT_URLOK =
-        this.options_.successUrl + separator(this.options_.successUrl) + "orderId=" + orderId
+        url + separator(url) + "orderId=" + orderId
     }
     if (this.options_.errorUrl) {
+      let url = this.options_.errorUrl
+      if (countryCode && supportedCountryCodes.includes(countryCode)) {
+        url = url.replace("/checkout/", "/" + countryCode + "/checkout/")
+      }
       merchantParams.DS_MERCHANT_URLKO =
-        this.options_.errorUrl + separator(this.options_.errorUrl) + "orderId=" + orderId
+        url + separator(url) + "orderId=" + orderId
     }
 
-    merchantParams.DS_MERCHANT_MERCHANTDATA = sessionId + "|" + orderId
+    const merchantDataParts = [cartId, sessionId, orderId].filter(Boolean)
+    merchantParams.DS_MERCHANT_MERCHANTDATA = merchantDataParts.join("|")
+
+    if (cartId) {
+      this.logger_.info("[REDSYS] cartId included in MerchantData: " + cartId)
+    }
+    if (countryCode) {
+      this.logger_.info("[REDSYS] countryCode injected into URLs: " + countryCode)
+    }
 
     const form = await this.redsysApi.createRedirectForm(
       merchantParams as any
