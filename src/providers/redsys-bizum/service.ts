@@ -32,8 +32,8 @@ import type {
 import type {
   RedsysOptions,
   RedsysPaymentSessionData,
-  RedsysRedirectForm,
 } from "../../types"
+import { BIZUM_PAY_METHOD } from "../../types"
 import { getSmallestUnit } from "../../utils/amount"
 import { getCurrencyNum } from "../../utils/currency"
 import { generateOrderId } from "../../utils/order-id"
@@ -63,8 +63,8 @@ function isRedsysCancellationAuthorized(dsResponse: string): boolean {
   return code === 400
 }
 
-class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
-  static identifier = "redsys"
+class RedsysBizumProviderService extends AbstractPaymentProvider<RedsysOptions> {
+  static identifier = "redsys-bizum"
 
   protected logger_: Logger
   protected options_: RedsysOptions
@@ -103,7 +103,7 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
     input: InitiatePaymentInput
   ): Promise<InitiatePaymentOutput> {
     const orderId = generateOrderId()
-    const sessionId = "redsys_" + orderId
+    const sessionId = "redsys_bizum_" + orderId
     const amount = this.assertPositiveAmount(input.amount)
     const amountStr = String(getSmallestUnit(amount, input.currency_code))
     const currencyNum = getCurrencyNum(input.currency_code)
@@ -125,6 +125,7 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
       DS_MERCHANT_CURRENCY: currencyNum,
       DS_MERCHANT_TRANSACTIONTYPE: transactionType,
       DS_MERCHANT_CONSUMERLANGUAGE: "1",
+      DS_MERCHANT_PAYMETHODS: BIZUM_PAY_METHOD,
     }
 
     if (this.options_.notificationUrl) {
@@ -155,10 +156,10 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
     merchantParams.DS_MERCHANT_MERCHANTDATA = merchantDataParts.join("|")
 
     if (cartId) {
-      this.logger_.info("[REDSYS] cartId included in MerchantData: " + cartId)
+      this.logger_.info("[REDSYS-BIZUM] cartId included in MerchantData: " + cartId)
     }
     if (countryCode) {
-      this.logger_.info("[REDSYS] countryCode injected into URLs: " + countryCode)
+      this.logger_.info("[REDSYS-BIZUM] countryCode injected into URLs: " + countryCode)
     }
 
     const form = await this.redsysApi.createRedirectForm(
@@ -177,7 +178,7 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
       formUrl: form.url,
     }
 
-    this.logger_.info("[REDSYS] Redirect form created for order: " + orderId)
+    this.logger_.info("[REDSYS-BIZUM] Redirect form created for order: " + orderId)
 
     return {
       id: sessionId,
@@ -185,7 +186,7 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
     }
   }
 
-// ---------- Authorize ----------
+  // ---------- Authorize ----------
 
   async authorizePayment(
     input: AuthorizePaymentInput
@@ -245,7 +246,7 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
     ) {
       sessionData.authCode = (response as any).Ds_AuthorisationCode
       this.logger_.info(
-        "[REDSYS] Capture successful for order: " + sessionData.orderId
+        "[REDSYS-BIZUM] Capture successful for order: " + sessionData.orderId
       )
     } else {
       throw new MedusaError(
@@ -289,7 +290,7 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
     if (isRedsysCancellationAuthorized((response as any).Ds_Response)) {
       sessionData.status = "cancelled"
       this.logger_.info(
-        "[REDSYS] Payment cancelled for order: " + sessionData.orderId
+        "[REDSYS-BIZUM] Payment cancelled for order: " + sessionData.orderId
       )
     } else {
       throw new MedusaError(
@@ -346,7 +347,7 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
     ) {
       sessionData.status = "refunded"
       this.logger_.info(
-        "[REDSYS] Refund processed for order: " +
+        "[REDSYS-BIZUM] Refund processed for order: " +
           sessionData.orderId +
           " Amount: " +
           amountStr
@@ -405,7 +406,7 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
     const sessionData =
       input.data as unknown as RedsysPaymentSessionData | undefined
     const orderId = sessionData?.orderId || generateOrderId()
-    const sessionId = "redsys_" + orderId
+    const sessionId = "redsys_bizum_" + orderId
     const amount = this.assertPositiveAmount(input.amount)
     const amountStr = String(getSmallestUnit(amount, input.currency_code))
     const currencyNum = getCurrencyNum(input.currency_code)
@@ -420,6 +421,7 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
       DS_MERCHANT_CURRENCY: currencyNum,
       DS_MERCHANT_TRANSACTIONTYPE: transactionType,
       DS_MERCHANT_CONSUMERLANGUAGE: "1",
+      DS_MERCHANT_PAYMETHODS: BIZUM_PAY_METHOD,
     }
 
     if (this.options_.notificationUrl) {
@@ -479,7 +481,7 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
       )
 
       if (!notification) {
-        this.logger_.warn("[REDSYS] Webhook: invalid notification data")
+        this.logger_.warn("[REDSYS-BIZUM] Webhook: invalid notification data")
         return { action: PaymentActions.NOT_SUPPORTED }
       }
 
@@ -487,7 +489,7 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
 
       if (isRedsysPaymentAuthorized(dsResponse)) {
         this.logger_.info(
-          "[REDSYS] Webhook: payment authorized for order: " +
+          "[REDSYS-BIZUM] Webhook: payment authorized for order: " +
             (notification as any).Ds_Order
         )
 
@@ -504,20 +506,19 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
             }
           }
         } catch {
-          // MerchantData parsing is best-effort
         }
 
         return {
           action: PaymentActions.SUCCESSFUL,
           data: {
-            session_id: sessionId || "redsys_" + orderId,
+            session_id: sessionId || "redsys_bizum_" + orderId,
             amount: (notification as any).Ds_Amount || 0,
           },
         }
       }
 
       this.logger_.warn(
-        "[REDSYS] Webhook: payment not authorized. Order: " +
+        "[REDSYS-BIZUM] Webhook: payment not authorized. Order: " +
           (notification as any).Ds_Order +
           " Response: " +
           dsResponse
@@ -528,7 +529,7 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
       }
     } catch (error) {
       this.logger_.error(
-        "[REDSYS] Webhook error: " + (error as Error).message
+        "[REDSYS-BIZUM] Webhook error: " + (error as Error).message
       )
       return { action: PaymentActions.NOT_SUPPORTED }
     }
@@ -548,4 +549,4 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
   }
 }
 
-export default RedsysProviderService
+export default RedsysBizumProviderService

@@ -3,7 +3,7 @@
  */
 
 export interface RedsysOptions {
-  /** REDSYS Secret Key (HMAC-SHA256) */
+  /** REDSYS Secret Key (HMAC-SHA512) */
   secretKey: string
   /** REDSYS Merchant Code (FUC) */
   merchantCode: string
@@ -93,13 +93,23 @@ export interface RedsysPaymentSessionData {
   transactionType: string
   /** Base64-encoded merchant parameters for the redirect form */
   merchantParams?: string
-  /** HMAC-SHA256 signature for the redirect form */
+  /** HMAC-SHA512 signature for the redirect form */
   signature?: string
-  /** Signature version (always "HMAC_SHA256_V1") */
+  /** Signature version (should be "HMAC_SHA512_V2" per Redsys v4.1) */
   signatureVersion?: string
   /** Redsys form action URL */
   formUrl?: string
 }
+
+/**
+ * Bizum payment method identifier for Ds_Merchant_Paymethods
+ */
+export const BIZUM_PAY_METHOD = "z"
+
+/**
+ * REDSYS Bizum Payment Provider Options
+ */
+export interface RedsysBizumOptions extends RedsysOptions {}
 
 /**
  * Redirect form data returned to the storefront

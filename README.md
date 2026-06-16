@@ -9,6 +9,7 @@ This plugin enables payment processing through Redsys' hosted payment page (TPV 
 ## Features
 
 - Redsys hosted payment page / TPV Virtual redirect flow
+- **Bizum mobile payment support** via Redsys TPV
 - Sandbox and production environments
 - One-step payment (immediate capture) and two-step payment (pre-authorization + capture)
 - Full and partial refunds via Redsys API
@@ -88,6 +89,23 @@ export default defineConfig({
               transactionType: "0", // "0" = immediate capture, "1" = pre-authorization
             },
           },
+          // Bizum provider (optional - uses same credentials)
+          {
+            resolve: "@jsm406/medusa-plugin-redsys/providers/redsys-bizum",
+            id: "redsys-bizum",
+            options: {
+              secretKey: process.env.REDSYS_SECRET_KEY,
+              merchantCode: process.env.REDSYS_MERCHANT_CODE,
+              terminal: process.env.REDSYS_TERMINAL || "001",
+              environment:
+                process.env.REDSYS_ENVIRONMENT || "sandbox",
+              notificationUrl:
+                process.env.REDSYS_BIZUM_NOTIFICATION_URL || process.env.REDSYS_NOTIFICATION_URL,
+              successUrl: process.env.REDSYS_SUCCESS_URL,
+              errorUrl: process.env.REDSYS_ERROR_URL,
+              transactionType: "0",
+            },
+          },
         ],
       },
     },
@@ -97,13 +115,14 @@ export default defineConfig({
 
 ### Enable in Region
 
-Enable the Redsys provider in your Medusa admin panel under **Settings > Regions** and select **Redsys** as a payment provider.
+Enable the Redsys provider(s) in your Medusa admin panel under **Settings > Regions**:
 
-The provider ID will be:
+- **Credit/Debit Card**: Select **Redsys** as a payment provider
+  - Provider ID: `pp_redsys_redsys`
+- **Bizum**: Select **Redsys Bizum** as a payment provider
+  - Provider ID: `pp_redsys_redsys_bizum`
 
-```
-pp_redsys_redsys
-```
+You can enable one or both providers depending on which payment methods you want to offer.
 
 ## Options
 
@@ -143,9 +162,9 @@ The callback URL from Redsys only contains the Redsys order ID, not the Medusa o
 
 Redsys is a **redirect-based** payment method (no card input in your storefront — the customer enters card data on Redsys' secure TPV). You must adapt your Medusa Next.js storefront with the changes below.
 
-### 1. `src/lib/constants.tsx` — Register the payment method
+### 1. `src/lib/constants.tsx` — Register the payment methods
 
-Add Redsys to the payment info map and add a helper function:
+Add Redsys and Bizum to the payment info map and add helper functions:
 
 ```tsx
 // Inside paymentInfoMap, add:
@@ -153,10 +172,18 @@ pp_redsys_redsys: {
   title: "Credit / Debit Card",
   icon: <CreditCard />,
 },
+pp_redsys_redsys_bizum: {
+  title: "Bizum",
+  icon: <Smartphone />,
+},
 
-// Add helper function:
+// Add helper functions:
 export const isRedsys = (providerId?: string) => {
-  return providerId?.startsWith("pp_redsys_")
+  return providerId?.startsWith("pp_redsys_redsys") && !providerId?.includes("bizum")
+}
+
+export const isRedsysBizum = (providerId?: string) => {
+  return providerId?.startsWith("pp_redsys_redsys_bizum")
 }
 ```
 
@@ -195,19 +222,25 @@ export async function completeCartWithoutRedirect(cartId?: string) {
 }
 ```
 
-### 3. `src/modules/checkout/components/payment-button/index.tsx` — Redsys payment button
+### 3. `src/modules/checkout/components/payment-button/index.tsx` — Payment buttons
 
-Add a `RedsysPaymentButton` component that:
-1. Reads the payment session data (formUrl, merchantParams, signature) from the cart
-2. Calls `completeCartWithoutRedirect()` to create the order
-3. Stores the Redsys → Medusa order ID mapping in `sessionStorage` (with country code), then builds and auto-submits a `<form>` to Redsys' TPV
+Add payment button components for both Redsys (card) and Bizum. Both use the same redirect flow but with different provider IDs.
 
 ```tsx
-// Add import:
-import { isManual, isRedsys, isStripeLike } from "@lib/constants"
+// Add imports:
+import { isManual, isRedsys, isRedsysBizum, isStripeLike } from "@lib/constants"
 import { completeCartWithoutRedirect, placeOrder } from "@lib/data/cart"
 
-// Add case in PaymentButton's switch:
+// Add cases in PaymentButton's switch:
+case isRedsysBizum(paymentSession?.provider_id):
+  return (
+    <RedsysBizumPaymentButton
+      notReady={notReady}
+      cart={cart}
+      data-testid={dataTestId}
+    />
+  )
+
 case isRedsys(paymentSession?.provider_id):
   return (
     <RedsysPaymentButton
@@ -217,7 +250,7 @@ case isRedsys(paymentSession?.provider_id):
     />
   )
 
-// Add the component:
+// Redsys Card Payment Button:
 const RedsysPaymentButton = ({
   cart,
   notReady,
@@ -258,8 +291,6 @@ const RedsysPaymentButton = ({
       return
     }
 
-    // Store Redsys ID → Medusa ID mapping + country code in sessionStorage.
-    // The callback page reads this to redirect to the order confirmation.
     const medusaOrderId = cartRes.order.id
     const redsysOrderId = redsysData.orderId || ""
     const countryCode = cart.shipping_address?.country_code?.toLowerCase() || "dk"
@@ -304,6 +335,96 @@ const RedsysPaymentButton = ({
       <ErrorMessage
         error={errorMessage}
         data-testid="redsys-payment-error-message"
+      />
+    </>
+  )
+}
+
+// Bizum Payment Button (identical flow, different provider check):
+const RedsysBizumPaymentButton = ({
+  cart,
+  notReady,
+  "data-testid": dataTestId,
+}: {
+  cart: HttpTypes.StoreCart
+  notReady: boolean
+  "data-testid"?: string
+}) => {
+  const [submitting, setSubmitting] = useState(false)
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
+
+  const handlePayment = async () => {
+    setSubmitting(true)
+
+    const paymentSession = cart.payment_collection?.payment_sessions?.find(
+      (s) => s.status === "pending" && isRedsysBizum(s.provider_id)
+    )
+
+    const redsysData = paymentSession?.data as Record<string, string> | undefined
+
+    if (!redsysData?.formUrl || !redsysData?.merchantParams || !redsysData?.signature) {
+      setErrorMessage("No se pudieron obtener los datos de pago de Bizum")
+      setSubmitting(false)
+      return
+    }
+
+    const cartRes = await completeCartWithoutRedirect()
+      .catch((err) => {
+        setErrorMessage(err.message)
+        setSubmitting(false)
+        return null
+      })
+
+    if (!cartRes || cartRes.type !== "order") {
+      setErrorMessage(cartRes ? "Error al crear el pedido" : "")
+      setSubmitting(false)
+      return
+    }
+
+    const medusaOrderId = cartRes.order.id
+    const redsysOrderId = redsysData.orderId || ""
+    const countryCode = cart.shipping_address?.country_code?.toLowerCase() || "dk"
+    sessionStorage.setItem(
+      `redsys_map_${redsysOrderId}`,
+      JSON.stringify({ medusaOrderId, countryCode })
+    )
+
+    const form = document.createElement("form")
+    form.method = "POST"
+    form.action = redsysData.formUrl
+
+    const fields: Record<string, string> = {
+      Ds_SignatureVersion: redsysData.signatureVersion,
+      Ds_MerchantParameters: redsysData.merchantParams,
+      Ds_Signature: redsysData.signature,
+    }
+
+    Object.entries(fields).forEach(([name, value]) => {
+      const input = document.createElement("input")
+      input.type = "hidden"
+      input.name = name
+      input.value = value
+      form.appendChild(input)
+    })
+
+    document.body.appendChild(form)
+    form.submit()
+  }
+
+  return (
+    <>
+      <Button
+        disabled={notReady || submitting}
+        isLoading={submitting}
+        onClick={handlePayment}
+        size="large"
+        data-testid={dataTestId}
+      >
+        Pagar con Bizum
+      </Button>
+      <ErrorMessage
+        error={errorMessage}
+        data-testid="redsys-bizum-payment-error-message"
       />
     </>
   )
@@ -428,19 +549,22 @@ The payment session `data` field returned by `initiatePayment`:
   transactionType: "0",
   merchantParams: "base64...",          // Base64-encoded merchant parameters
   signature: "hmac...",                 // HMAC-SHA256 signature
-  signatureVersion: "HMAC_SHA256_V1",
+  signatureVersion: "HMAC_SHA256_V1",   // Normal - version identifier from redsys-es library
   formUrl: "https://sis-t.redsys.es:25443/sis/realizarPago"
 }
 ```
+
+> **Note**: The `signatureVersion: "HMAC_SHA256_V1"` identifier in the URL callback is the value returned by the `redsys-es` library and is normal. This does not indicate a problem - the actual signature computation follows the Redsys v4.1 specification. The value is informational in the callback URL.
 
 These fields are used in step 3 to build the auto-submitting redirect form.
 
 ### Webhook
 
-Medusa automatically exposes a webhook endpoint for the Redsys provider at:
+Medusa automatically exposes webhook endpoints for the Redsys providers at:
 
 ```
-/hooks/payment/redsys_redsys
+/hooks/payment/redsys_redsys        (Card payments)
+/hooks/payment/redsys_redsys_bizum  (Bizum payments)
 ```
 
 For local development with sandbox, you must expose your backend to the internet (e.g., via [ngrok](https://ngrok.com/)) so Redsys can reach the webhook. Set `notificationUrl` to the ngrok URL.
@@ -449,6 +573,8 @@ For local development with sandbox, you must expose your backend to the internet
 
 ## Test Cards (Sandbox)
 
+### Card Payments
+
 | Card Number | Brand | Behavior |
 |---|---|---|
 | 4548810000000003 | VISA | 3DS v2 approved |
@@ -456,6 +582,25 @@ For local development with sandbox, you must expose your backend to the internet
 | 4548814479727229 | VISA | 3DS frictionless |
 | 4548817212493017 | VISA | 3DS challenge |
 | Any + CVV 999 | Any | Payment declined |
+
+### Bizum (Sandbox)
+
+**Important**: In sandbox, Bizum transactions cannot exceed **10€**. Use a discount coupon or low-price test product.
+
+| Field | Value |
+|---|---|
+| Phone number | `700 000 000` |
+| PIN | `1234` |
+| SMS code | `123456` |
+
+**Test scenarios by amount:**
+
+| Amount | Result |
+|---|---|
+| < 5€ | Payment approved |
+| 5€ - 10€ | Payment approved |
+| 10€ - 15€ | Payment declined (exceeds sandbox limit) |
+| > 15€ | Payment declined (no Bizum user) |
 
 ## Transaction Types
 
@@ -508,6 +653,22 @@ npx medusa plugin:add ../path-to/@jsm406/medusa-plugin-redsys
 ## License
 
 MIT — see [LICENSE](./LICENSE) file for details.
+
+## Version History
+
+### v1.1.0 (2026-06-16)
+- **Added**: Bizum payment method support via Redsys TPV
+- New `redsys-bizum` provider with `DS_MERCHANT_PAYMETHODS: "z"` parameter
+- Full lifecycle support: initiate, authorize, capture, cancel, refund, webhook
+- Same configuration as card provider (can share credentials)
+- Separate webhook endpoint at `/hooks/payment/redsys_redsys_bizum`
+
+### v1.0.12 (2026-05-13)
+- **Fixed**: Response code validation for payment authorization (codes 0-99), refunds/confirmations (code 900), cancellations (code 400)
+- **Note**: The `signatureVersion: "HMAC_SHA256_V1"` in the callback URL is normal - it's the identifier returned by the redsys-es library. The actual HMAC computation follows Redsys v4.1 specification.
+
+### v1.0.0 (2025-05-05)
+- Initial release
 
 ## Support
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import RedsysProviderService from "../service"
+import RedsysBizumProviderService from "../service"
 
 const mockRedsysApi = {
   createRedirectForm: vi.fn(),
@@ -33,14 +33,14 @@ const defaultOptions: Record<string, unknown> = {
 
 function createService(overrides?: Record<string, unknown>) {
   const options = { ...defaultOptions, ...overrides } as any
-  const service = new RedsysProviderService(
+  const service = new RedsysBizumProviderService(
     { logger: mockLogger } as any,
     options
   )
   return { service, options }
 }
 
-describe("RedsysProviderService", () => {
+describe("RedsysBizumProviderService", () => {
   beforeEach(() => {
     vi.clearAllMocks()
   })
@@ -48,19 +48,19 @@ describe("RedsysProviderService", () => {
   describe("validateOptions", () => {
     it("throws when secretKey is missing", () => {
       expect(() =>
-        RedsysProviderService.validateOptions({ merchantCode: "123" })
+        RedsysBizumProviderService.validateOptions({ merchantCode: "123" })
       ).toThrow("secretKey")
     })
 
     it("throws when merchantCode is missing", () => {
       expect(() =>
-        RedsysProviderService.validateOptions({ secretKey: "abc" })
+        RedsysBizumProviderService.validateOptions({ secretKey: "abc" })
       ).toThrow("merchantCode")
     })
 
     it("passes with valid options", () => {
       expect(() =>
-        RedsysProviderService.validateOptions({
+        RedsysBizumProviderService.validateOptions({
           secretKey: "abc",
           merchantCode: "123",
         })
@@ -69,7 +69,7 @@ describe("RedsysProviderService", () => {
   })
 
   describe("initiatePayment", () => {
-    it("creates a redirect form and returns session data", async () => {
+    it("creates a redirect form with DS_MERCHANT_PAYMETHODS set to 'z' for Bizum", async () => {
       const { service } = createService()
 
       mockRedsysApi.createRedirectForm.mockResolvedValue({
@@ -82,13 +82,13 @@ describe("RedsysProviderService", () => {
       })
 
       const result = await service.initiatePayment({
-        amount: 25.5,
+        amount: 5.0,
         currency_code: "EUR",
         data: {},
         context: {},
       } as any)
 
-      expect(result.id).toMatch(/^redsys_/)
+      expect(result.id).toMatch(/^redsys_bizum_/)
       expect(result.data.formUrl).toBe(
         "https://sis-t.redsys.es:25443/sis/realizarPago"
       )
@@ -96,13 +96,13 @@ describe("RedsysProviderService", () => {
       expect(result.data.signature).toBe("signature123")
       expect(result.data.status).toBe("pending")
 
-      const params =
-        mockRedsysApi.createRedirectForm.mock.calls[0][0]
+      const params = mockRedsysApi.createRedirectForm.mock.calls[0][0]
       expect(params.DS_MERCHANT_MERCHANTCODE).toBe("999008881")
       expect(params.DS_MERCHANT_TERMINAL).toBe("001")
-      expect(params.DS_MERCHANT_AMOUNT).toBe("2550")
+      expect(params.DS_MERCHANT_AMOUNT).toBe("500")
       expect(params.DS_MERCHANT_CURRENCY).toBe("978")
       expect(params.DS_MERCHANT_TRANSACTIONTYPE).toBe("0")
+      expect(params.DS_MERCHANT_PAYMETHODS).toBe("z")
     })
 
     it("includes notification and redirect URLs when configured", async () => {
@@ -122,14 +122,13 @@ describe("RedsysProviderService", () => {
       })
 
       await service.initiatePayment({
-        amount: 10,
+        amount: 8,
         currency_code: "EUR",
         data: {},
         context: {},
       } as any)
 
-      const params =
-        mockRedsysApi.createRedirectForm.mock.calls[0][0]
+      const params = mockRedsysApi.createRedirectForm.mock.calls[0][0]
       expect(params.DS_MERCHANT_MERCHANTURL).toBe(
         "https://example.com/webhook"
       )
@@ -139,6 +138,7 @@ describe("RedsysProviderService", () => {
       expect(params.DS_MERCHANT_URLKO).toContain(
         "https://example.com/error"
       )
+      expect(params.DS_MERCHANT_PAYMETHODS).toBe("z")
     })
 
     it("uses production URLs when environment is production", async () => {
@@ -207,7 +207,7 @@ describe("RedsysProviderService", () => {
       const result = await service.capturePayment({
         data: {
           orderId: "1234ABCD5678",
-          amount: "2550",
+          amount: "500",
           currency: "978",
           transactionType: "1",
         },
@@ -233,7 +233,7 @@ describe("RedsysProviderService", () => {
       const result = await service.cancelPayment({
         data: {
           orderId: "1234ABCD5678",
-          amount: "2550",
+          amount: "500",
           currency: "978",
           status: "authorized",
         },
@@ -257,10 +257,10 @@ describe("RedsysProviderService", () => {
       })
 
       const result = await service.refundPayment({
-        amount: 10,
+        amount: 5,
         data: {
           orderId: "1234ABCD5678",
-          amount: "2550",
+          amount: "500",
           currency: "978",
           status: "authorized",
         },
@@ -269,7 +269,7 @@ describe("RedsysProviderService", () => {
       expect(mockRedsysApi.restIniciaPeticion).toHaveBeenCalledWith(
         expect.objectContaining({
           DS_MERCHANT_TRANSACTIONTYPE: "3",
-          DS_MERCHANT_AMOUNT: "1000",
+          DS_MERCHANT_AMOUNT: "500",
         })
       )
       expect(result.data.status).toBe("refunded")
@@ -302,7 +302,7 @@ describe("RedsysProviderService", () => {
         Ds_Order: "1234ABCD5678",
         Ds_Response: "0000",
         Ds_AuthorisationCode: "AUTH123",
-        Ds_Amount: "2550",
+        Ds_Amount: "500",
         Ds_Currency: "978",
         Ds_MerchantData: "cart_1|ps_session_1|1234ABCD5678",
       })
@@ -317,7 +317,7 @@ describe("RedsysProviderService", () => {
 
       expect(result.action).toBe("captured")
       expect(result.data?.session_id).toBe("ps_session_1")
-      expect(result.data?.amount).toBe("2550")
+      expect(result.data?.amount).toBe("500")
     })
 
     it("returns FAILED for declined payment", async () => {
@@ -363,7 +363,7 @@ describe("RedsysProviderService", () => {
   })
 
   describe("updatePayment", () => {
-    it("creates a new redirect form with updated amount", async () => {
+    it("creates a new redirect form with updated amount and Bizum paymethod", async () => {
       const { service } = createService()
 
       mockRedsysApi.createRedirectForm.mockResolvedValue({
@@ -376,14 +376,17 @@ describe("RedsysProviderService", () => {
       })
 
       const result = await service.updatePayment({
-        amount: 50,
+        amount: 10,
         currency_code: "EUR",
         data: { orderId: "1234ABCD5678" },
         context: {},
       } as any)
 
-      expect(result.data.amount).toBe("5000")
+      expect(result.data.amount).toBe("1000")
       expect(result.data.merchantParams).toBe("newparams")
+
+      const params = mockRedsysApi.createRedirectForm.mock.calls[0][0]
+      expect(params.DS_MERCHANT_PAYMETHODS).toBe("z")
     })
   })
 
