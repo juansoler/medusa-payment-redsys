@@ -5,6 +5,14 @@ All notable changes to this project will be documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.4] - 2026-08-31
+
+### Fixed
+
+- Webhook no confirmaba el pago aunque Redsys lo autorizara:
+  - `Ds_MerchantData` llega URL-encoded (el `|` como `%7C`); se decodifica antes de `split("|")`.
+  - `paymentSessionService.update` se invocaba con firma incorrecta (`update(id, data)`); el servicio interno espera `update({ id, data })`. Sin esto, `webhookConfirmed` nunca se persistía y `authorizePayment` seguía en `PENDING`.
+
 ## [1.1.3] - 2026-08-31
 
 ### Fixed

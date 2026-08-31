@@ -228,12 +228,10 @@ describe("RedsysBizumProviderService", () => {
 
       expect(result.action).toBe("captured")
       expect(result.data?.amount).toBe(5)
-      expect(mockPaymentSessionService.update).toHaveBeenCalledWith(
-        SESSION_ID,
-        expect.objectContaining({
-          data: expect.objectContaining({ webhookConfirmed: true }),
-        })
-      )
+      expect(mockPaymentSessionService.update).toHaveBeenCalledWith({
+        id: SESSION_ID,
+        data: expect.objectContaining({ webhookConfirmed: true }),
+      })
     })
 
     it("rejects a webhook meant for the card provider", async () => {

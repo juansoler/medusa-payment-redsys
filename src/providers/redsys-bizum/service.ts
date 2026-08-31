@@ -548,7 +548,13 @@ class RedsysBizumProviderService extends AbstractPaymentProvider<RedsysOptions> 
         (notification as any).Ds_AuthorisationCode ?? ""
       )
 
-      const merchantData = String((notification as any).Ds_MerchantData ?? "")
+      let merchantData = String((notification as any).Ds_MerchantData ?? "")
+      try {
+        // Redsys URL-encodea el MerchantData (el "|" llega como %7C)
+        merchantData = decodeURIComponent(merchantData)
+      } catch {
+        // ya estaba decodificado
+      }
       const parts = merchantData.split("|")
 
       if (!orderId || parts.length !== 3) {
@@ -616,7 +622,8 @@ class RedsysBizumProviderService extends AbstractPaymentProvider<RedsysOptions> 
         return { action: PaymentActions.FAILED }
       }
 
-      await paymentSessionService.update(webhookSessionId, {
+      await paymentSessionService.update({
+        id: webhookSessionId,
         data: {
           ...sessionData,
           webhookConfirmed: true,

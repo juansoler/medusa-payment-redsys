@@ -548,7 +548,13 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
         (notification as any).Ds_AuthorisationCode ?? ""
       )
 
-      const merchantData = String((notification as any).Ds_MerchantData ?? "")
+      let merchantData = String((notification as any).Ds_MerchantData ?? "")
+      try {
+        // Redsys URL-encodea el MerchantData (el "|" llega como %7C)
+        merchantData = decodeURIComponent(merchantData)
+      } catch {
+        // ya estaba decodificado
+      }
       const parts = merchantData.split("|")
 
       if (!orderId || parts.length !== 3) {
@@ -618,7 +624,10 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
       }
 
       // Marcar la sesión como confirmada por webhook (persistido en la BD).
-      await paymentSessionService.update(webhookSessionId, {
+      // El servicio interno `update` recibe (input, sharedContext), con el id
+      // dentro del objeto de entrada.
+      await paymentSessionService.update({
+        id: webhookSessionId,
         data: {
           ...sessionData,
           webhookConfirmed: true,

@@ -274,12 +274,10 @@ describe("RedsysProviderService", () => {
       expect(result.data?.session_id).toBe(SESSION_ID)
       expect(result.data?.amount).toBe(25.5)
 
-      expect(mockPaymentSessionService.update).toHaveBeenCalledWith(
-        SESSION_ID,
-        expect.objectContaining({
-          data: expect.objectContaining({ webhookConfirmed: true }),
-        })
-      )
+      expect(mockPaymentSessionService.update).toHaveBeenCalledWith({
+        id: SESSION_ID,
+        data: expect.objectContaining({ webhookConfirmed: true }),
+      })
     })
 
     it("returns AUTHORIZED for preauthorization webhooks (tx 1)", async () => {
