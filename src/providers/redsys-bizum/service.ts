@@ -5,7 +5,7 @@ import {
   PaymentSessionStatus,
 } from "@medusajs/framework/utils"
 import { createRedsysAPI, SANDBOX_URLS, PRODUCTION_URLS } from "redsys-easy"
-import type { Logger } from "@medusajs/medusa"
+import type { Logger } from "@medusajs/framework/types"
 import type {
   InitiatePaymentInput,
   InitiatePaymentOutput,

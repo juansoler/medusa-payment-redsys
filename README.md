@@ -365,6 +365,10 @@ MIT — see [LICENSE](./LICENSE) file for details.
 
 ## Version History
 
+### v1.1.2 (2026-08-31)
+
+- **Fixed**: Install-time `ERESOLVE` peer dependency conflict — removed `@medusajs/medusa` from `peerDependencies` (aligned with the official `@medusajs/payment-stripe` convention; only `@medusajs/framework` is required).
+
 ### v1.1.1 (2026-08-31) — Security release
 
 - **SECURITY**: Never authorize a `pending` Redsys payment before an HMAC-confirmed webhook

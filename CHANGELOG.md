@@ -5,6 +5,12 @@ All notable changes to this project will be documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] - 2026-08-31
+
+### Fixed
+
+- Install-time `ERESOLVE` peer dependency conflict: the plugin no longer declares `@medusajs/medusa` as a peer dependency (aligned with the official `@medusajs/payment-stripe` convention). `Logger` is now imported from `@medusajs/framework/types`. Only `@medusajs/framework` is required as a peer, so `npm i` no longer forces npm to resolve Medusa's admin tree (and its `react-dom` requirement) in consumer projects.
+
 ## [1.1.1] - 2026-08-31
 
 ### Security

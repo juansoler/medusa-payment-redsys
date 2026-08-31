@@ -1,6 +1,6 @@
 {
   "name": "@jsm406/medusa-plugin-redsys",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Redsys / Sermepa TPV Virtual payment provider plugin for MedusaJS v2 with Bizum support",
   "author": "Juan Soler Márquez",
   "license": "MIT",
@@ -46,8 +46,7 @@
     "redsys-easy": "^5.3.0"
   },
   "peerDependencies": {
-    "@medusajs/framework": "^2.13.0",
-    "@medusajs/medusa": "^2.13.0"
+    "@medusajs/framework": "^2.13.0"
   },
   "devDependencies": {
     "@medusajs/cli": "^2.13.0",
