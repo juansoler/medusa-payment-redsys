@@ -38,7 +38,7 @@ import {
   getSmallestUnit,
   getAmountFromSmallestUnit,
 } from "../../utils/amount"
-import { getCurrencyNum } from "../../utils/currency"
+import { getCurrencyNum, getCurrencyCode } from "../../utils/currency"
 import { generateOrderId } from "../../utils/order-id"
 import { getErrorMessage } from "../../utils/errors"
 import {
@@ -46,16 +46,9 @@ import {
   isRedsysConfirmationAuthorized,
   isRedsysCancellationAuthorized,
 } from "../../utils/response-codes"
-import {
-  createPaymentReference,
-  getPaymentReference,
-  markPaymentReferenceConfirmed,
-  type DbConnection,
-} from "../../utils/reference-store"
 
 type InjectedDependencies = {
   logger: Logger
-  pgConnection: DbConnection
 }
 
 const DEFAULTS = {
@@ -64,6 +57,7 @@ const DEFAULTS = {
 } as const
 
 const PROVIDER_ID = "redsys"
+const PROVIDER_PREFIX = "pp_redsys_redsys"
 
 class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
   static identifier = "redsys"
@@ -71,7 +65,6 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
   protected logger_: Logger
   protected options_: RedsysOptions
   protected redsysApi: ReturnType<typeof createRedsysAPI>
-  protected pgConnection_: DbConnection
 
   static validateOptions(options: Record<string, unknown>): void {
     if (!options.secretKey || typeof options.secretKey !== "string") {
@@ -92,7 +85,6 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
     super(container, options)
     this.logger_ = container.logger
     this.options_ = options
-    this.pgConnection_ = container.pgConnection
 
     this.redsysApi = createRedsysAPI({
       secretKey: options.secretKey,
@@ -176,19 +168,6 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
     merchantParams.DS_MERCHANT_MERCHANTDATA =
       `${cartId}|${medusaSessionId}|${orderId}`
 
-    await createPaymentReference(this.pgConnection_, {
-      orderId,
-      paymentSessionId: medusaSessionId,
-      provider: PROVIDER_ID,
-      cartId: cartId || null,
-      amount: amountStr,
-      currencyCode,
-      currencyNum,
-      merchantCode: this.options_.merchantCode,
-      terminal,
-      transactionType,
-    })
-
     const form = await this.redsysApi.createRedirectForm(
       merchantParams as any
     )
@@ -199,8 +178,10 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
       cartId: cartId || undefined,
       amount: amountStr,
       currency: currencyNum,
+      currencyCode,
       status: "pending",
       transactionType,
+      webhookConfirmed: false,
       merchantParams: form.body.Ds_MerchantParameters,
       signature: form.body.Ds_Signature,
       signatureVersion: form.body.Ds_SignatureVersion,
@@ -236,26 +217,14 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
       }
     }
 
-    const reference = await getPaymentReference(
-      this.pgConnection_,
-      sessionData.orderId
-    )
-
-    const valid =
-      !!reference &&
-      !!reference.confirmed_at &&
-      reference.payment_session_id === sessionData.medusaSessionId &&
-      reference.amount === sessionData.amount &&
-      reference.currency_num === sessionData.currency &&
-      reference.provider === PROVIDER_ID &&
-      reference.merchant_code === this.options_.merchantCode &&
-      reference.transaction_type === sessionData.transactionType
-
-    if (!valid) {
+    // Solo se autoriza si un webhook HMAC válido confirmó esta sesión. El
+    // webhook es el único que pone `webhookConfirmed` a true, tras validar
+    // order, importe, moneda, provider, comercio, terminal y tipo de operación.
+    if (sessionData.webhookConfirmed !== true) {
       this.logger_.warn(
         "[REDSYS] Session " +
           sessionData.medusaSessionId +
-          " not authorized: webhook not confirmed for order " +
+          " not authorized: no valid webhook confirmation for order " +
           sessionData.orderId
       )
       return {
@@ -518,19 +487,6 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
     merchantParams.DS_MERCHANT_MERCHANTDATA =
       `${cartId}|${sessionData.medusaSessionId}|${orderId}`
 
-    await createPaymentReference(this.pgConnection_, {
-      orderId,
-      paymentSessionId: sessionData.medusaSessionId,
-      provider: PROVIDER_ID,
-      cartId: cartId || null,
-      amount: amountStr,
-      currencyCode,
-      currencyNum,
-      merchantCode: this.options_.merchantCode,
-      terminal,
-      transactionType,
-    })
-
     const form = await this.redsysApi.createRedirectForm(
       merchantParams as any
     )
@@ -541,8 +497,10 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
       cartId: cartId || undefined,
       amount: amountStr,
       currency: currencyNum,
+      currencyCode,
       status: "pending",
       transactionType,
+      webhookConfirmed: false,
       merchantParams: form.body.Ds_MerchantParameters,
       signature: form.body.Ds_Signature,
       signatureVersion: form.body.Ds_SignatureVersion,
@@ -590,29 +548,12 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
         (notification as any).Ds_AuthorisationCode ?? ""
       )
 
-      if (!orderId) {
-        this.logger_.warn("[REDSYS] Webhook: missing order")
-        return { action: PaymentActions.NOT_SUPPORTED }
-      }
-
-      const reference = await getPaymentReference(
-        this.pgConnection_,
-        orderId
-      )
-
-      if (!reference) {
-        this.logger_.warn("[REDSYS] Ignoring unknown order: " + orderId)
-        return { action: PaymentActions.NOT_SUPPORTED }
-      }
-
-      const merchantData = String(
-        (notification as any).Ds_MerchantData ?? ""
-      )
+      const merchantData = String((notification as any).Ds_MerchantData ?? "")
       const parts = merchantData.split("|")
 
-      if (parts.length !== 3) {
-        this.logger_.error(
-          "[REDSYS] Webhook MerchantData malformed for order " + orderId
+      if (!orderId || parts.length !== 3) {
+        this.logger_.warn(
+          "[REDSYS] Webhook: missing order or malformed MerchantData"
         )
         return { action: PaymentActions.NOT_SUPPORTED }
       }
@@ -620,19 +561,44 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
       const webhookSessionId = parts[1]
       const merchantOrderId = parts[2]
 
+      // Recuperar la payment session asociada (server-side, fuente de verdad).
+      const paymentSessionService = (this.container as any)
+        ?.paymentSessionService
+
+      let session: any
+      try {
+        session = await paymentSessionService.retrieve(webhookSessionId, {
+          select: ["id", "data", "provider_id"],
+        })
+      } catch (error) {
+        this.logger_.warn(
+          "[REDSYS] Webhook: session not found " + webhookSessionId
+        )
+        return { action: PaymentActions.NOT_SUPPORTED }
+      }
+
+      if (!session?.data) {
+        this.logger_.warn(
+          "[REDSYS] Webhook: session has no data " + webhookSessionId
+        )
+        return { action: PaymentActions.NOT_SUPPORTED }
+      }
+
+      const sessionData = session.data as Record<string, any>
+
       const sameTerminal =
         Number.parseInt(terminal, 10) ===
-        Number.parseInt(reference.terminal, 10)
+        Number.parseInt(this.options_.terminal || DEFAULTS.terminal, 10)
 
       const validReference =
-        merchantOrderId === reference.order_id &&
-        webhookSessionId === reference.payment_session_id &&
-        amount === reference.amount &&
-        currencyNum === reference.currency_num &&
-        merchantCode === reference.merchant_code &&
+        merchantOrderId === sessionData.orderId &&
+        webhookSessionId === sessionData.medusaSessionId &&
+        amount === sessionData.amount &&
+        currencyNum === sessionData.currency &&
+        merchantCode === this.options_.merchantCode &&
         sameTerminal &&
-        transactionType === reference.transaction_type &&
-        reference.provider === PROVIDER_ID
+        transactionType === sessionData.transactionType &&
+        String(session.provider_id || "").startsWith(PROVIDER_PREFIX)
 
       if (!validReference) {
         this.logger_.error(
@@ -651,25 +617,30 @@ class RedsysProviderService extends AbstractPaymentProvider<RedsysOptions> {
         return { action: PaymentActions.FAILED }
       }
 
-      await markPaymentReferenceConfirmed(
-        this.pgConnection_,
-        orderId,
-        dsResponse,
-        authCode
-      )
+      // Marcar la sesión como confirmada por webhook (persistido en la BD).
+      await paymentSessionService.update(webhookSessionId, {
+        data: {
+          ...sessionData,
+          webhookConfirmed: true,
+          responseCode: dsResponse,
+          authCode,
+        },
+      })
 
       this.logger_.info(
         "[REDSYS] Webhook: payment authorized for order: " + orderId
       )
 
+      const currencyCode = getCurrencyCode(currencyNum) || "eur"
+
       return {
         action:
-          reference.transaction_type === "1"
+          transactionType === "1"
             ? PaymentActions.AUTHORIZED
             : PaymentActions.SUCCESSFUL,
         data: {
-          session_id: reference.payment_session_id,
-          amount: getAmountFromSmallestUnit(amount, reference.currency_code),
+          session_id: webhookSessionId,
+          amount: getAmountFromSmallestUnit(amount, currencyCode),
         },
       }
     } catch (error) {

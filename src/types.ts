@@ -93,6 +93,7 @@ export interface RedsysPaymentSessionData {
   cartId?: string
   amount: string
   currency: string
+  currencyCode?: string
   status:
     | "pending"
     | "authorized"
@@ -102,6 +103,11 @@ export interface RedsysPaymentSessionData {
     | "error"
   authCode?: string
   responseCode?: string
+  /**
+   * Only the validated Redsys webhook sets this to true. `authorizePayment`
+   * refuses to authorize a session until it is true.
+   */
+  webhookConfirmed?: boolean
   transactionType: string
   /** Base64-encoded merchant parameters for the redirect form */
   merchantParams?: string

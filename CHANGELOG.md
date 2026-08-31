@@ -5,6 +5,17 @@ All notable changes to this project will be documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.3] - 2026-08-31
+
+### Fixed
+
+- **Provider registration crash**: the plugin constructor accessed `container.pgConnection`, which the Payment module's awilix cradle cannot resolve (`AwilixResolutionError: Could not resolve 'pgConnection'`), so `pp_redsys_redsys` / `pp_redsys-bizum_redsys-bizum` were never registered. The reference/confirmation is now persisted in the Payment Session `data` field via the Payment module's internal `paymentSessionService` (accessible from the provider), which survives restarts and needs no direct DB access.
+
+### Security
+
+- `getWebhookActionAndData()` (after `redsys-easy` verifies the HMAC) retrieves the Payment Session and validates order, amount, currency, provider, merchant, terminal and transaction type against its data, then writes `webhookConfirmed: true` — the only code path that can set it.
+- `authorizePayment()` returns `PENDING` until `webhookConfirmed` is true; it never trusts the stored `status` field.
+
 ## [1.1.2] - 2026-08-31
 
 ### Fixed
