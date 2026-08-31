@@ -15,6 +15,7 @@ This plugin enables payment processing through Redsys' hosted payment page (TPV 
 - Full and partial refunds via Redsys API
 - Payment cancellation
 - Webhook handling with HMAC-SHA256 signature verification
+- **Secure webhook correlation**: a payment is only authorized after a valid, fully matching webhook (order, session, amount, currency, provider, merchant, terminal and transaction type)
 - Spanish error messages for Redsys response codes
 - Zero PCI scope — card data is handled by Redsys' secure page
 
@@ -24,6 +25,7 @@ This plugin enables payment processing through Redsys' hosted payment page (TPV 
 - Node.js v20 or later
 - A [Redsys merchant account](https://comercios.redsys.es/) (or sandbox test credentials)
 - `redsys-easy` v5.3.0+ (installed automatically as a dependency)
+- PostgreSQL (the plugin persists a `redsys_payment_reference` table)
 
 ## Installation
 
@@ -139,28 +141,31 @@ You can enable one or both providers depending on which payment methods you want
 
 ## Payment Flow
 
-1. Customer selects **Redsys** as payment method
-2. `initiatePayment()` creates a signed redirect form with Redsys merchant parameters
-3. Customer clicks "Place Order" → storefront calls `cart.complete()` to create the order, stores a cookie mapping the Redsys internal order ID to the Medusa order ID, then auto-submits the redirect form to Redsys TPV
+1. Customer selects **Redsys** as payment method → Medusa creates a Payment Session (`payses_...`)
+2. `initiatePayment()` generates a secure Redsys `orderId`, records a **payment reference** (`orderId` ↔ payment session, amount, currency, merchant, terminal, transaction type) in the `redsys_payment_reference` table, and creates a signed redirect form
+3. Customer clicks "Place Order" → the storefront saves `{ cartId, countryCode }` in `sessionStorage` and auto-submits the redirect form to Redsys TPV. **`cart.complete()` is NOT called here** — no order is created before the payment exists
 4. Customer completes payment on the Redsys hosted payment page
 5. Redsys sends a **webhook notification** to `{backendUrl}/hooks/payment/redsys_redsys`
-6. `getWebhookActionAndData()` validates the HMAC-SHA256 signature and updates the payment status
-7. Redsys redirects the customer's browser to `successUrl` or `errorUrl` with the Redsys order ID as a query parameter
-8. Storefront callback page reads the sessionStorage to resolve the Medusa order ID and redirects to the order confirmation page
+6. `getWebhookActionAndData()` verifies the HMAC signature and validates the order, session, amount, currency, provider, merchant, terminal and transaction type against the stored reference, then marks it as confirmed
+7. Medusa authorizes/captures the payment and **completes the cart server-side**, creating the order
+8. Redsys redirects the customer's browser to `successUrl` or `errorUrl` with the Redsys order ID as a query parameter
+9. Storefront callback page reads the saved `cartId`, retries `cart.complete()` if needed, and redirects to the order confirmation page
 
-### Important: authorizePayment Behavior
+### Security: authorizePayment Behavior
 
-This plugin's `authorizePayment` returns `AUTHORIZED` for sessions with status `"pending"` **and** `"authorized"`. This is intentional for the redirect flow: the real authorization happens on Redsys TPV and is confirmed via webhook. Without this, `cart.complete()` would fail with a 400 error because Medusa requires the payment session to be authorized before completing the cart.
+A payment session is only authorized after a **valid HMAC-confirmed webhook** that fully matches the stored payment reference. `authorizePayment` returns `PENDING` for any session whose reference is missing, not confirmed, or mismatched (amount, currency, session, provider, merchant or transaction type). It never trusts the stored `status` field, so a `"pending"` — or even a forged `"authorized"` — status can never authorize a payment on its own.
 
 ### ID Mapping (Redsys → Medusa)
 
-The plugin generates a 12-character alphanumeric `orderId` (e.g. `97727XYIWRRF`) used as Redsys' merchant order reference. When the order is completed via `cart.complete()`, Medusa generates its own order ID (e.g. `order_01KR3B4X...`). These are **different IDs**.
+The plugin generates a 12-character alphanumeric `orderId` (e.g. `97727XYIWRRF`) used as Redsys' merchant order reference. When the cart is completed after payment, Medusa generates its own order ID (e.g. `order_01KR3B4X...`). These are **different IDs**.
 
-The callback URL from Redsys only contains the Redsys order ID, not the Medusa order ID. To bridge this gap, the storefront stores the mapping `redsys_map_{redsysOrderId}` → `{ medusaOrderId, countryCode }` in `sessionStorage` before redirecting to the TPV. The callback page reads this value to redirect to the correct order confirmation page.
+The callback URL from Redsys only contains the Redsys order ID, not the Medusa order ID. To bridge this gap, the storefront stores the mapping `redsys_cart_{redsysOrderId}` → `{ cartId, countryCode }` in `sessionStorage` before redirecting to the TPV. The callback page uses the `cartId` to retrieve/complete the order and redirect to the correct confirmation page.
 
 ## Storefront Integration
 
 Redsys is a **redirect-based** payment method (no card input in your storefront — the customer enters card data on Redsys' secure TPV). You must adapt your Medusa Next.js storefront with the changes below.
+
+> **Security**: starting with v1.1.1 the storefront must **not** call `cart.complete()` before redirecting to Redsys. Doing so would fail anyway (the payment is not authorized yet) and previously created unpaid orders. The Redsys webhook completes the cart after the payment is confirmed.
 
 ### 1. `src/lib/constants.tsx` — Register the payment methods
 
@@ -187,333 +192,14 @@ export const isRedsysBizum = (providerId?: string) => {
 }
 ```
 
-### 2. `src/lib/data/cart.ts` — Add order completion without redirect
+### 2. Payment buttons and callback page
 
-Add a `completeCartWithoutRedirect` function. The standard `placeOrder` does a `redirect()` (server-side), but Redsys needs to redirect the browser to the TPV instead. This function completes the cart, creates the order, but returns the result so the client can handle the TPV redirect:
+The full copyable implementation lives in [`examples/storefront-redsys.md`](./examples/storefront-redsys.md). The two critical changes vs. older versions:
 
-```ts
-export async function completeCartWithoutRedirect(cartId?: string) {
-  const id = cartId || (await getCartId())
+- The payment buttons **no longer call `cart.complete()`** before redirecting to Redsys. They only store `{ cartId, countryCode }` in `sessionStorage` under `redsys_cart_{orderId}` and submit the redirect form. The HMAC-confirmed webhook completes the cart server-side.
+- The callback page reads `orderId` from the URL, recovers the `cartId`, and retries `cart.complete()` with exponential backoff to bridge the race between the browser redirect and the webhook arrival.
 
-  if (!id) {
-    throw new Error("No existing cart found when completing cart")
-  }
-
-  const headers = {
-    ...(await getAuthHeaders()),
-  }
-
-  const cartRes = await sdk.store.cart
-    .complete(id, {}, headers)
-    .then(async (cartRes) => {
-      const cartCacheTag = await getCacheTag("carts")
-      revalidateTag(cartCacheTag)
-      return cartRes
-    })
-    .catch(medusaError)
-
-  if (cartRes?.type === "order") {
-    const orderCacheTag = await getCacheTag("orders")
-    revalidateTag(orderCacheTag)
-    removeCartId()
-  }
-
-  return cartRes
-}
-```
-
-### 3. `src/modules/checkout/components/payment-button/index.tsx` — Payment buttons
-
-Add payment button components for both Redsys (card) and Bizum. Both use the same redirect flow but with different provider IDs.
-
-```tsx
-// Add imports:
-import { isManual, isRedsys, isRedsysBizum, isStripeLike } from "@lib/constants"
-import { completeCartWithoutRedirect, placeOrder } from "@lib/data/cart"
-
-// Add cases in PaymentButton's switch:
-case isRedsysBizum(paymentSession?.provider_id):
-  return (
-    <RedsysBizumPaymentButton
-      notReady={notReady}
-      cart={cart}
-      data-testid={dataTestId}
-    />
-  )
-
-case isRedsys(paymentSession?.provider_id):
-  return (
-    <RedsysPaymentButton
-      notReady={notReady}
-      cart={cart}
-      data-testid={dataTestId}
-    />
-  )
-
-// Redsys Card Payment Button:
-const RedsysPaymentButton = ({
-  cart,
-  notReady,
-  "data-testid": dataTestId,
-}: {
-  cart: HttpTypes.StoreCart
-  notReady: boolean
-  "data-testid"?: string
-}) => {
-  const [submitting, setSubmitting] = useState(false)
-  const [errorMessage, setErrorMessage] = useState<string | null>(null)
-
-  const handlePayment = async () => {
-    setSubmitting(true)
-
-    const paymentSession = cart.payment_collection?.payment_sessions?.find(
-      (s) => s.status === "pending" && isRedsys(s.provider_id)
-    )
-
-    const redsysData = paymentSession?.data as Record<string, string> | undefined
-
-    if (!redsysData?.formUrl || !redsysData?.merchantParams || !redsysData?.signature) {
-      setErrorMessage("No se pudieron obtener los datos de pago de Redsys")
-      setSubmitting(false)
-      return
-    }
-
-    const cartRes = await completeCartWithoutRedirect()
-      .catch((err) => {
-        setErrorMessage(err.message)
-        setSubmitting(false)
-        return null
-      })
-
-    if (!cartRes || cartRes.type !== "order") {
-      setErrorMessage(cartRes ? "Error al crear el pedido" : "")
-      setSubmitting(false)
-      return
-    }
-
-    const medusaOrderId = cartRes.order.id
-    const redsysOrderId = redsysData.orderId || ""
-    const countryCode = cart.shipping_address?.country_code?.toLowerCase() || "dk"
-    sessionStorage.setItem(
-      `redsys_map_${redsysOrderId}`,
-      JSON.stringify({ medusaOrderId, countryCode })
-    )
-
-    const form = document.createElement("form")
-    form.method = "POST"
-    form.action = redsysData.formUrl
-
-    const fields: Record<string, string> = {
-      Ds_SignatureVersion: redsysData.signatureVersion,
-      Ds_MerchantParameters: redsysData.merchantParams,
-      Ds_Signature: redsysData.signature,
-    }
-
-    Object.entries(fields).forEach(([name, value]) => {
-      const input = document.createElement("input")
-      input.type = "hidden"
-      input.name = name
-      input.value = value
-      form.appendChild(input)
-    })
-
-    document.body.appendChild(form)
-    form.submit()
-  }
-
-  return (
-    <>
-      <Button
-        disabled={notReady || submitting}
-        isLoading={submitting}
-        onClick={handlePayment}
-        size="large"
-        data-testid={dataTestId}
-      >
-        Place order
-      </Button>
-      <ErrorMessage
-        error={errorMessage}
-        data-testid="redsys-payment-error-message"
-      />
-    </>
-  )
-}
-
-// Bizum Payment Button (identical flow, different provider check):
-const RedsysBizumPaymentButton = ({
-  cart,
-  notReady,
-  "data-testid": dataTestId,
-}: {
-  cart: HttpTypes.StoreCart
-  notReady: boolean
-  "data-testid"?: string
-}) => {
-  const [submitting, setSubmitting] = useState(false)
-  const [errorMessage, setErrorMessage] = useState<string | null>(null)
-
-  const handlePayment = async () => {
-    setSubmitting(true)
-
-    const paymentSession = cart.payment_collection?.payment_sessions?.find(
-      (s) => s.status === "pending" && isRedsysBizum(s.provider_id)
-    )
-
-    const redsysData = paymentSession?.data as Record<string, string> | undefined
-
-    if (!redsysData?.formUrl || !redsysData?.merchantParams || !redsysData?.signature) {
-      setErrorMessage("No se pudieron obtener los datos de pago de Bizum")
-      setSubmitting(false)
-      return
-    }
-
-    const cartRes = await completeCartWithoutRedirect()
-      .catch((err) => {
-        setErrorMessage(err.message)
-        setSubmitting(false)
-        return null
-      })
-
-    if (!cartRes || cartRes.type !== "order") {
-      setErrorMessage(cartRes ? "Error al crear el pedido" : "")
-      setSubmitting(false)
-      return
-    }
-
-    const medusaOrderId = cartRes.order.id
-    const redsysOrderId = redsysData.orderId || ""
-    const countryCode = cart.shipping_address?.country_code?.toLowerCase() || "dk"
-    sessionStorage.setItem(
-      `redsys_map_${redsysOrderId}`,
-      JSON.stringify({ medusaOrderId, countryCode })
-    )
-
-    const form = document.createElement("form")
-    form.method = "POST"
-    form.action = redsysData.formUrl
-
-    const fields: Record<string, string> = {
-      Ds_SignatureVersion: redsysData.signatureVersion,
-      Ds_MerchantParameters: redsysData.merchantParams,
-      Ds_Signature: redsysData.signature,
-    }
-
-    Object.entries(fields).forEach(([name, value]) => {
-      const input = document.createElement("input")
-      input.type = "hidden"
-      input.name = name
-      input.value = value
-      form.appendChild(input)
-    })
-
-    document.body.appendChild(form)
-    form.submit()
-  }
-
-  return (
-    <>
-      <Button
-        disabled={notReady || submitting}
-        isLoading={submitting}
-        onClick={handlePayment}
-        size="large"
-        data-testid={dataTestId}
-      >
-        Pagar con Bizum
-      </Button>
-      <ErrorMessage
-        error={errorMessage}
-        data-testid="redsys-bizum-payment-error-message"
-      />
-    </>
-  )
-}
-```
-
-### 4. `src/app/checkout/redsys-callback/page.tsx` — Callback page (new file)
-
-Create a **client component** page that Redsys redirects to after payment. It reads the `orderId` query param (Redsys internal ID), looks up the real Medusa order ID from `sessionStorage`, and redirects to the order confirmation page:
-
-```tsx
-"use client"
-
-import { useRouter, useSearchParams } from "next/navigation"
-import { useEffect, useState } from "react"
-
-export default function RedsysCallbackPage() {
-  const searchParams = useSearchParams()
-  const router = useRouter()
-  const [status, setStatus] = useState<"loading" | "error" | "success">("loading")
-
-  const isError = searchParams?.get("error") === "1"
-  const redsysOrderId = searchParams?.get("orderId")
-
-  useEffect(() => {
-    if (isError) {
-      setStatus("error")
-      return
-    }
-
-    if (!redsysOrderId) {
-      setStatus("success")
-      return
-    }
-
-    const stored = sessionStorage.getItem(`redsys_map_${redsysOrderId}`)
-
-    if (stored) {
-      let orderData: { medusaOrderId: string; countryCode: string }
-      try {
-        orderData = JSON.parse(stored)
-      } catch {
-        orderData = { medusaOrderId: stored, countryCode: "dk" }
-      }
-      sessionStorage.removeItem(`redsys_map_${redsysOrderId}`)
-      router.replace(
-        `/${orderData.countryCode}/order/${orderData.medusaOrderId}/confirmed`
-      )
-      return
-    }
-
-    setStatus("success")
-  }, [isError, redsysOrderId, router])
-
-  if (status === "loading") {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-[50vh] gap-4 p-8">
-        <p className="text-gray-600">Procesando pago...</p>
-      </div>
-    )
-  }
-
-  if (status === "error") {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-[50vh] gap-4 p-8">
-        <h1 className="text-2xl font-bold text-red-600">Pago no completado</h1>
-        <p className="text-gray-600">
-          La operación no se ha completado correctamente.
-        </p>
-        <a href="/" className="mt-4 px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">
-          Volver a la tienda
-        </a>
-      </div>
-    )
-  }
-
-  return (
-    <div className="flex flex-col items-center justify-center min-h-[50vh] gap-4 p-8">
-      <h1 className="text-2xl font-bold text-green-600">Pago procesado</h1>
-      <p className="text-gray-600">Tu pago ha sido procesado correctamente.</p>
-      <a href="/" className="mt-4 px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">
-        Volver a la tienda
-      </a>
-    </div>
-  )
-}
-```
-
-### 5. `src/middleware.ts` — Bypass region redirect
+### 3. `src/middleware.ts` — Bypass region redirect
 
 If your storefront uses middleware to enforce region/country code prefixes in URLs (as the default Medusa Next.js storefront does), add a bypass so `/checkout/redsys-callback` is not redirected. Add this early in the `middleware` function:
 
@@ -524,7 +210,7 @@ if (request.nextUrl.pathname.startsWith("/checkout/redsys-callback")) {
 }
 ```
 
-### 6. `medusa-config.ts` — CORS
+### 4. `medusa-config.ts` — CORS
 
 Ensure your storefront domain is allowed in CORS:
 
@@ -542,21 +228,21 @@ The payment session `data` field returned by `initiatePayment`:
 
 ```ts
 {
-  orderId: "1234ABCD5678",
-  amount: "2550",
-  currency: "978",
+  orderId: "1234ABCD5678",        // Redsys merchant order (12 chars, ^\d{4}[A-Z0-9]{8}$)
+  medusaSessionId: "payses_...",  // Real Medusa payment session ID — never the Redsys order
+  cartId: "cart_...",             // Optional
+  amount: "2550",                 // Smallest currency unit (cents)
+  currency: "978",                // Redsys numeric currency code
   status: "pending",
   transactionType: "0",
   merchantParams: "base64...",          // Base64-encoded merchant parameters
   signature: "hmac...",                 // HMAC-SHA256 signature
-  signatureVersion: "HMAC_SHA256_V1",   // Normal - version identifier from redsys-es library
+  signatureVersion: "HMAC_SHA256_V1",   // Version identifier returned by redsys-easy
   formUrl: "https://sis-t.redsys.es:25443/sis/realizarPago"
 }
 ```
 
-> **Note**: The `signatureVersion: "HMAC_SHA256_V1"` identifier in the URL callback is the value returned by the `redsys-es` library and is normal. This does not indicate a problem - the actual signature computation follows the Redsys v4.1 specification. The value is informational in the callback URL.
-
-These fields are used in step 3 to build the auto-submitting redirect form.
+> **Note**: The `signatureVersion: "HMAC_SHA256_V1"` identifier in the callback URL is the value returned by the `redsys-easy` library and is normal. This does not indicate a problem — the actual signature computation follows the Redsys v4.1 specification.
 
 ### Webhook
 
@@ -570,6 +256,22 @@ Medusa automatically exposes webhook endpoints for the Redsys providers at:
 For local development with sandbox, you must expose your backend to the internet (e.g., via [ngrok](https://ngrok.com/)) so Redsys can reach the webhook. Set `notificationUrl` to the ngrok URL.
 
 **Important**: Redsys sends the notification to `notificationUrl` but the signature verification and payment status update happens through the Medusa webhook handler — make sure `notificationUrl` points to the same endpoint or forward notifications accordingly.
+
+## Persistence: `redsys_payment_reference`
+
+The plugin creates and manages a small table to guarantee that only payments it initiated can ever be confirmed:
+
+| Column | Purpose |
+|---|---|
+| `order_id` | Redsys order ID (primary key) |
+| `payment_session_id` | Real Medusa payment session (`payses_...`) |
+| `provider` | `redsys` or `redsys-bizum` |
+| `cart_id` | Medusa cart, if available |
+| `amount`, `currency_code`, `currency_num` | Expected amount/currency |
+| `merchant_code`, `terminal`, `transaction_type` | Expected merchant/terminal/type |
+| `confirmed_at`, `ds_response`, `auth_code` | Set by the validated webhook |
+
+The table is created lazily with `CREATE TABLE IF NOT EXISTS` on first use, so no manual migration is required. A webhook can only confirm a payment that the plugin itself recorded in `initiatePayment`/`updatePayment`, and only if every field matches.
 
 ## Test Cards (Sandbox)
 
@@ -614,15 +316,22 @@ For local development with sandbox, you must expose your backend to the internet
 
 ## Security
 
-- **Never log PAN, CVV, or the secret key**. The provider strips sensitive fields from log output.
-- **Always validate signatures server-side**. `getWebhookActionAndData()` uses `redsys-easy`'s `processRestNotification()` for HMAC-SHA256 verification.
+- **Never log PAN, CVV, or the secret key.** The provider strips sensitive fields from log output.
+- **Always validate signatures server-side.** `getWebhookActionAndData()` uses `redsys-easy`'s `processRestNotification()`, which verifies the HMAC signature before anything else.
+- **The webhook is the only source of truth.** A payment is authorized only when a valid webhook confirms a payment the plugin previously recorded, and the amount, currency, provider, merchant, terminal and transaction type all match. Reusing an old `orderId` is impossible because each payment session gets its own reference.
 - **Use HTTPS** for all communication with Redsys.
-- **Do not trust client-side payment data**. The webhook with signature verification is the source of truth.
+- **Do not trust client-side payment data.** The webhook with signature verification is the source of truth.
+- **Amounts are normalized.** `Ds_Amount` is received in the smallest unit (e.g. `"2550"`) and converted back to the main unit (`25.5`) before being passed to Medusa.
+- **Unsupported currencies fail closed.** An unknown currency throws instead of silently charging in EUR.
 - The redirect flow keeps you out of PCI scope — card data is handled by Redsys' secure page.
+
+### Upgrading from < 1.1.1
+
+Sessions created before v1.1.1 do not carry a `medusaSessionId` and have no payment reference, so they will not be authorized (fail-closed). Customers in the middle of a checkout will need to refresh / recreate their payment session. This is intentional: it is safer to reject than to authorize an unverified payment.
 
 ## Currency Support
 
-The plugin includes built-in numeric currency codes for all major currencies. If your currency is not listed, it defaults to EUR (`978`). See `src/types.ts` for the full list.
+The plugin includes built-in numeric currency codes for all major currencies (see `src/types.ts` for the full list). Unsupported currencies are **rejected** with an error rather than silently falling back to EUR.
 
 ## Development
 
@@ -655,6 +364,20 @@ npx medusa plugin:add ../path-to/@jsm406/medusa-plugin-redsys
 MIT — see [LICENSE](./LICENSE) file for details.
 
 ## Version History
+
+### v1.1.1 (2026-08-31) — Security release
+
+- **SECURITY**: Never authorize a `pending` Redsys payment before an HMAC-confirmed webhook
+- **SECURITY**: Correlate webhooks with the real Medusa payment session ID (`payses_...`) instead of an artificial `redsys_*` ID
+- **SECURITY**: Validate order, amount, currency, provider, merchant, terminal and transaction type before confirming a webhook
+- **SECURITY**: Persist a payment reference (`redsys_payment_reference`) for every initiated payment, preventing reuse of previously confirmed `orderId`s
+- **SECURITY**: Generate Redsys order IDs using cryptographic randomness instead of `Math.random()`
+- **SECURITY**: Reject unsupported currencies instead of silently falling back to EUR
+- **FIX**: Normalize webhook amounts (`Ds_Amount` in cents → main unit) before passing them to Medusa
+- **FIX**: Return `AUTHORIZED` for preauthorizations and `SUCCESSFUL` for immediate captures in webhook actions
+- **FIX**: Tighten Redsys response-code validation (4-digit payment codes 0000-0099, confirmation/refund 900, cancellation 400)
+- **FIX**: Make `updatePayment()` generate a fresh `orderId` and keep MerchantData at fixed 3-position layout
+- **FIX**: Storefront flow no longer creates the order before the payment (see `examples/storefront-redsys.md`)
 
 ### v1.1.0 (2026-06-16)
 - **Added**: Bizum payment method support via Redsys TPV

@@ -34,13 +34,28 @@ import type {
   RedsysPaymentSessionData,
 } from "../../types"
 import { BIZUM_PAY_METHOD } from "../../types"
-import { getSmallestUnit } from "../../utils/amount"
+import {
+  getSmallestUnit,
+  getAmountFromSmallestUnit,
+} from "../../utils/amount"
 import { getCurrencyNum } from "../../utils/currency"
 import { generateOrderId } from "../../utils/order-id"
 import { getErrorMessage } from "../../utils/errors"
+import {
+  isRedsysPaymentAuthorized,
+  isRedsysConfirmationAuthorized,
+  isRedsysCancellationAuthorized,
+} from "../../utils/response-codes"
+import {
+  createPaymentReference,
+  getPaymentReference,
+  markPaymentReferenceConfirmed,
+  type DbConnection,
+} from "../../utils/reference-store"
 
 type InjectedDependencies = {
   logger: Logger
+  pgConnection: DbConnection
 }
 
 const DEFAULTS = {
@@ -48,20 +63,7 @@ const DEFAULTS = {
   transactionType: "0",
 } as const
 
-function isRedsysPaymentAuthorized(dsResponse: string): boolean {
-  const code = parseInt(dsResponse, 10)
-  return Number.isFinite(code) && code >= 0 && code <= 99
-}
-
-function isRedsysRefundOrConfirmationAuthorized(dsResponse: string): boolean {
-  const code = parseInt(dsResponse, 10)
-  return code === 900
-}
-
-function isRedsysCancellationAuthorized(dsResponse: string): boolean {
-  const code = parseInt(dsResponse, 10)
-  return code === 400
-}
+const PROVIDER_ID = "redsys-bizum"
 
 class RedsysBizumProviderService extends AbstractPaymentProvider<RedsysOptions> {
   static identifier = "redsys-bizum"
@@ -69,6 +71,7 @@ class RedsysBizumProviderService extends AbstractPaymentProvider<RedsysOptions> 
   protected logger_: Logger
   protected options_: RedsysOptions
   protected redsysApi: ReturnType<typeof createRedsysAPI>
+  protected pgConnection_: DbConnection
 
   static validateOptions(options: Record<string, unknown>): void {
     if (!options.secretKey || typeof options.secretKey !== "string") {
@@ -89,6 +92,7 @@ class RedsysBizumProviderService extends AbstractPaymentProvider<RedsysOptions> 
     super(container, options)
     this.logger_ = container.logger
     this.options_ = options
+    this.pgConnection_ = container.pgConnection
 
     this.redsysApi = createRedsysAPI({
       secretKey: options.secretKey,
@@ -102,13 +106,30 @@ class RedsysBizumProviderService extends AbstractPaymentProvider<RedsysOptions> 
   async initiatePayment(
     input: InitiatePaymentInput
   ): Promise<InitiatePaymentOutput> {
+    const inputData = (input.data || {}) as Record<string, unknown>
+
+    const medusaSessionId =
+      typeof inputData.session_id === "string"
+        ? inputData.session_id
+        : typeof input.context?.idempotency_key === "string"
+          ? input.context.idempotency_key
+          : undefined
+
+    if (!medusaSessionId) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        "Missing Medusa payment session ID"
+      )
+    }
+
     const orderId = generateOrderId()
-    const sessionId = "redsys_bizum_" + orderId
     const amount = this.assertPositiveAmount(input.amount)
     const amountStr = String(getSmallestUnit(amount, input.currency_code))
     const currencyNum = getCurrencyNum(input.currency_code)
+    const currencyCode = input.currency_code.toLowerCase()
     const transactionType =
       this.options_.transactionType || DEFAULTS.transactionType
+    const terminal = this.options_.terminal || DEFAULTS.terminal
 
     const context = (input.context || {}) as Record<string, unknown>
     const cartId = (context.cart_id as string) || ""
@@ -119,7 +140,7 @@ class RedsysBizumProviderService extends AbstractPaymentProvider<RedsysOptions> 
 
     const merchantParams: Record<string, string> = {
       DS_MERCHANT_MERCHANTCODE: this.options_.merchantCode,
-      DS_MERCHANT_TERMINAL: this.options_.terminal || DEFAULTS.terminal,
+      DS_MERCHANT_TERMINAL: terminal,
       DS_MERCHANT_ORDER: orderId,
       DS_MERCHANT_AMOUNT: amountStr,
       DS_MERCHANT_CURRENCY: currencyNum,
@@ -152,15 +173,22 @@ class RedsysBizumProviderService extends AbstractPaymentProvider<RedsysOptions> 
         url + separator(url) + "orderId=" + orderId
     }
 
-    const merchantDataParts = [cartId, sessionId, orderId].filter(Boolean)
-    merchantParams.DS_MERCHANT_MERCHANTDATA = merchantDataParts.join("|")
+    // Fixed positions: cartId | Medusa payment session id | Redsys order id
+    merchantParams.DS_MERCHANT_MERCHANTDATA =
+      `${cartId}|${medusaSessionId}|${orderId}`
 
-    if (cartId) {
-      this.logger_.info("[REDSYS-BIZUM] cartId included in MerchantData: " + cartId)
-    }
-    if (countryCode) {
-      this.logger_.info("[REDSYS-BIZUM] countryCode injected into URLs: " + countryCode)
-    }
+    await createPaymentReference(this.pgConnection_, {
+      orderId,
+      paymentSessionId: medusaSessionId,
+      provider: PROVIDER_ID,
+      cartId: cartId || null,
+      amount: amountStr,
+      currencyCode,
+      currencyNum,
+      merchantCode: this.options_.merchantCode,
+      terminal,
+      transactionType,
+    })
 
     const form = await this.redsysApi.createRedirectForm(
       merchantParams as any
@@ -168,6 +196,8 @@ class RedsysBizumProviderService extends AbstractPaymentProvider<RedsysOptions> 
 
     const sessionData: RedsysPaymentSessionData = {
       orderId,
+      medusaSessionId,
+      cartId: cartId || undefined,
       amount: amountStr,
       currency: currencyNum,
       status: "pending",
@@ -178,10 +208,16 @@ class RedsysBizumProviderService extends AbstractPaymentProvider<RedsysOptions> 
       formUrl: form.url,
     }
 
+    if (cartId) {
+      this.logger_.info("[REDSYS-BIZUM] cartId included in MerchantData: " + cartId)
+    }
+    if (countryCode) {
+      this.logger_.info("[REDSYS-BIZUM] countryCode injected into URLs: " + countryCode)
+    }
     this.logger_.info("[REDSYS-BIZUM] Redirect form created for order: " + orderId)
 
     return {
-      id: sessionId,
+      id: medusaSessionId,
       data: sessionData as unknown as Record<string, unknown>,
     }
   }
@@ -194,19 +230,53 @@ class RedsysBizumProviderService extends AbstractPaymentProvider<RedsysOptions> 
     const sessionData =
       input.data as unknown as RedsysPaymentSessionData | undefined
 
-    if (
-      sessionData?.status === "authorized" ||
-      sessionData?.status === "pending"
-    ) {
+    if (!sessionData?.orderId || !sessionData?.medusaSessionId) {
       return {
-        status: PaymentSessionStatus.AUTHORIZED,
+        status: PaymentSessionStatus.PENDING,
         data: input.data as Record<string, unknown>,
       }
     }
 
+    const reference = await getPaymentReference(
+      this.pgConnection_,
+      sessionData.orderId
+    )
+
+    const valid =
+      !!reference &&
+      !!reference.confirmed_at &&
+      reference.payment_session_id === sessionData.medusaSessionId &&
+      reference.amount === sessionData.amount &&
+      reference.currency_num === sessionData.currency &&
+      reference.provider === PROVIDER_ID &&
+      reference.merchant_code === this.options_.merchantCode &&
+      reference.transaction_type === sessionData.transactionType
+
+    if (!valid) {
+      this.logger_.warn(
+        "[REDSYS-BIZUM] Session " +
+          sessionData.medusaSessionId +
+          " not authorized: webhook not confirmed for order " +
+          sessionData.orderId
+      )
+      return {
+        status: PaymentSessionStatus.PENDING,
+        data: input.data as Record<string, unknown>,
+      }
+    }
+
+    const status =
+      sessionData.transactionType === "1"
+        ? PaymentSessionStatus.AUTHORIZED
+        : PaymentSessionStatus.CAPTURED
+
     return {
-      status: PaymentSessionStatus.PENDING,
-      data: input.data as Record<string, unknown>,
+      status,
+      data: {
+        ...(input.data as Record<string, unknown>),
+        status:
+          status === PaymentSessionStatus.CAPTURED ? "captured" : "authorized",
+      },
     }
   }
 
@@ -241,8 +311,7 @@ class RedsysBizumProviderService extends AbstractPaymentProvider<RedsysOptions> 
     const response = await this.redsysApi.restIniciaPeticion(params as any)
 
     if (
-      isRedsysPaymentAuthorized((response as any).Ds_Response) ||
-      isRedsysRefundOrConfirmationAuthorized((response as any).Ds_Response)
+      isRedsysConfirmationAuthorized(String((response as any).Ds_Response))
     ) {
       sessionData.authCode = (response as any).Ds_AuthorisationCode
       this.logger_.info(
@@ -287,7 +356,7 @@ class RedsysBizumProviderService extends AbstractPaymentProvider<RedsysOptions> 
 
     const response = await this.redsysApi.restIniciaPeticion(params as any)
 
-    if (isRedsysCancellationAuthorized((response as any).Ds_Response)) {
+    if (isRedsysCancellationAuthorized(String((response as any).Ds_Response))) {
       sessionData.status = "cancelled"
       this.logger_.info(
         "[REDSYS-BIZUM] Payment cancelled for order: " + sessionData.orderId
@@ -339,12 +408,7 @@ class RedsysBizumProviderService extends AbstractPaymentProvider<RedsysOptions> 
     const response = await this.redsysApi.restIniciaPeticion(params as any)
     const code = String((response as any).Ds_Response)
 
-    if (
-      code === "0000" ||
-      code.startsWith("00") ||
-      code === "0900" ||
-      code === "900"
-    ) {
+    if (isRedsysConfirmationAuthorized(code)) {
       sessionData.status = "refunded"
       this.logger_.info(
         "[REDSYS-BIZUM] Refund processed for order: " +
@@ -379,6 +443,8 @@ class RedsysBizumProviderService extends AbstractPaymentProvider<RedsysOptions> 
     switch (sessionData.status) {
       case "authorized":
         return { status: PaymentSessionStatus.AUTHORIZED }
+      case "captured":
+        return { status: PaymentSessionStatus.CAPTURED }
       case "refunded":
         return { status: PaymentSessionStatus.CAPTURED }
       case "cancelled":
@@ -405,17 +471,28 @@ class RedsysBizumProviderService extends AbstractPaymentProvider<RedsysOptions> 
   ): Promise<UpdatePaymentOutput> {
     const sessionData =
       input.data as unknown as RedsysPaymentSessionData | undefined
-    const orderId = sessionData?.orderId || generateOrderId()
-    const sessionId = "redsys_bizum_" + orderId
+
+    if (!sessionData?.medusaSessionId) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        "Missing Medusa payment session ID"
+      )
+    }
+
+    const orderId = generateOrderId()
     const amount = this.assertPositiveAmount(input.amount)
     const amountStr = String(getSmallestUnit(amount, input.currency_code))
     const currencyNum = getCurrencyNum(input.currency_code)
+    const currencyCode = input.currency_code.toLowerCase()
     const transactionType =
       this.options_.transactionType || DEFAULTS.transactionType
+    const terminal = this.options_.terminal || DEFAULTS.terminal
+
+    const cartId = sessionData.cartId || ""
 
     const merchantParams: Record<string, string> = {
       DS_MERCHANT_MERCHANTCODE: this.options_.merchantCode,
-      DS_MERCHANT_TERMINAL: this.options_.terminal || DEFAULTS.terminal,
+      DS_MERCHANT_TERMINAL: terminal,
       DS_MERCHANT_ORDER: orderId,
       DS_MERCHANT_AMOUNT: amountStr,
       DS_MERCHANT_CURRENCY: currencyNum,
@@ -439,7 +516,22 @@ class RedsysBizumProviderService extends AbstractPaymentProvider<RedsysOptions> 
         this.options_.errorUrl + separator(this.options_.errorUrl) + "orderId=" + orderId
     }
 
-    merchantParams.DS_MERCHANT_MERCHANTDATA = sessionId + "|" + orderId
+    // Fixed positions: cartId | Medusa payment session id | Redsys order id
+    merchantParams.DS_MERCHANT_MERCHANTDATA =
+      `${cartId}|${sessionData.medusaSessionId}|${orderId}`
+
+    await createPaymentReference(this.pgConnection_, {
+      orderId,
+      paymentSessionId: sessionData.medusaSessionId,
+      provider: PROVIDER_ID,
+      cartId: cartId || null,
+      amount: amountStr,
+      currencyCode,
+      currencyNum,
+      merchantCode: this.options_.merchantCode,
+      terminal,
+      transactionType,
+    })
 
     const form = await this.redsysApi.createRedirectForm(
       merchantParams as any
@@ -447,6 +539,8 @@ class RedsysBizumProviderService extends AbstractPaymentProvider<RedsysOptions> 
 
     const newData: RedsysPaymentSessionData = {
       orderId,
+      medusaSessionId: sessionData.medusaSessionId,
+      cartId: cartId || undefined,
       amount: amountStr,
       currency: currencyNum,
       status: "pending",
@@ -485,47 +579,100 @@ class RedsysBizumProviderService extends AbstractPaymentProvider<RedsysOptions> 
         return { action: PaymentActions.NOT_SUPPORTED }
       }
 
-      const dsResponse = String((notification as any).Ds_Response)
+      const orderId = String((notification as any).Ds_Order ?? "")
+      const dsResponse = String((notification as any).Ds_Response ?? "")
+      const amount = String((notification as any).Ds_Amount ?? "")
+      const currencyNum = String((notification as any).Ds_Currency ?? "")
+      const merchantCode = String((notification as any).Ds_MerchantCode ?? "")
+      const terminal = String((notification as any).Ds_Terminal ?? "")
+      const transactionType = String(
+        (notification as any).Ds_TransactionType ?? ""
+      )
+      const authCode = String(
+        (notification as any).Ds_AuthorisationCode ?? ""
+      )
 
-      if (isRedsysPaymentAuthorized(dsResponse)) {
-        this.logger_.info(
-          "[REDSYS-BIZUM] Webhook: payment authorized for order: " +
-            (notification as any).Ds_Order
-        )
-
-        let sessionId: string | undefined
-        let orderId = (notification as any).Ds_Order
-
-        try {
-          const merchantData = (notification as any).Ds_MerchantData
-          if (merchantData) {
-            const parts = merchantData.split("|")
-            if (parts.length >= 3) {
-              orderId = parts[2]
-              sessionId = parts[1]
-            }
-          }
-        } catch {
-        }
-
-        return {
-          action: PaymentActions.SUCCESSFUL,
-          data: {
-            session_id: sessionId || "redsys_bizum_" + orderId,
-            amount: (notification as any).Ds_Amount || 0,
-          },
-        }
+      if (!orderId) {
+        this.logger_.warn("[REDSYS-BIZUM] Webhook: missing order")
+        return { action: PaymentActions.NOT_SUPPORTED }
       }
 
-      this.logger_.warn(
-        "[REDSYS-BIZUM] Webhook: payment not authorized. Order: " +
-          (notification as any).Ds_Order +
-          " Response: " +
-          dsResponse
+      const reference = await getPaymentReference(
+        this.pgConnection_,
+        orderId
+      )
+
+      if (!reference) {
+        this.logger_.warn("[REDSYS-BIZUM] Ignoring unknown order: " + orderId)
+        return { action: PaymentActions.NOT_SUPPORTED }
+      }
+
+      const merchantData = String(
+        (notification as any).Ds_MerchantData ?? ""
+      )
+      const parts = merchantData.split("|")
+
+      if (parts.length !== 3) {
+        this.logger_.error(
+          "[REDSYS-BIZUM] Webhook MerchantData malformed for order " + orderId
+        )
+        return { action: PaymentActions.NOT_SUPPORTED }
+      }
+
+      const webhookSessionId = parts[1]
+      const merchantOrderId = parts[2]
+
+      const sameTerminal =
+        Number.parseInt(terminal, 10) ===
+        Number.parseInt(reference.terminal, 10)
+
+      const validReference =
+        merchantOrderId === reference.order_id &&
+        webhookSessionId === reference.payment_session_id &&
+        amount === reference.amount &&
+        currencyNum === reference.currency_num &&
+        merchantCode === reference.merchant_code &&
+        sameTerminal &&
+        transactionType === reference.transaction_type &&
+        reference.provider === PROVIDER_ID
+
+      if (!validReference) {
+        this.logger_.error(
+          "[REDSYS-BIZUM] Webhook data mismatch for order " + orderId
+        )
+        return { action: PaymentActions.NOT_SUPPORTED }
+      }
+
+      if (!isRedsysPaymentAuthorized(dsResponse)) {
+        this.logger_.warn(
+          "[REDSYS-BIZUM] Webhook: payment not authorized. Order: " +
+            orderId +
+            " Response: " +
+            dsResponse
+        )
+        return { action: PaymentActions.FAILED }
+      }
+
+      await markPaymentReferenceConfirmed(
+        this.pgConnection_,
+        orderId,
+        dsResponse,
+        authCode
+      )
+
+      this.logger_.info(
+        "[REDSYS-BIZUM] Webhook: payment authorized for order: " + orderId
       )
 
       return {
-        action: PaymentActions.FAILED,
+        action:
+          reference.transaction_type === "1"
+            ? PaymentActions.AUTHORIZED
+            : PaymentActions.SUCCESSFUL,
+        data: {
+          session_id: reference.payment_session_id,
+          amount: getAmountFromSmallestUnit(amount, reference.currency_code),
+        },
       }
     } catch (error) {
       this.logger_.error(

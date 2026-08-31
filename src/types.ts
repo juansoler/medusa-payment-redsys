@@ -3,7 +3,7 @@
  */
 
 export interface RedsysOptions {
-  /** REDSYS Secret Key (HMAC-SHA512) */
+  /** REDSYS Secret Key (HMAC-SHA256 per Redsys v4.1) */
   secretKey: string
   /** REDSYS Merchant Code (FUC) */
   merchantCode: string
@@ -85,17 +85,29 @@ export const RedsysResponseCodes = {
  */
 export interface RedsysPaymentSessionData {
   orderId: string
+  /**
+   * Real Medusa Payment Session ID (payses_...).
+   * Never replace this with the Redsys order ID.
+   */
+  medusaSessionId: string
+  cartId?: string
   amount: string
   currency: string
-  status: "pending" | "authorized" | "refunded" | "cancelled" | "error"
+  status:
+    | "pending"
+    | "authorized"
+    | "captured"
+    | "refunded"
+    | "cancelled"
+    | "error"
   authCode?: string
   responseCode?: string
   transactionType: string
   /** Base64-encoded merchant parameters for the redirect form */
   merchantParams?: string
-  /** HMAC-SHA512 signature for the redirect form */
+  /** HMAC-SHA256 signature for the redirect form */
   signature?: string
-  /** Signature version (should be "HMAC_SHA512_V2" per Redsys v4.1) */
+  /** Signature version identifier (e.g. "HMAC_SHA256_V1" as returned by redsys-easy) */
   signatureVersion?: string
   /** Redsys form action URL */
   formUrl?: string

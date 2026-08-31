@@ -5,6 +5,26 @@ All notable changes to this project will be documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-08-31
+
+### Security
+
+- `authorizePayment()` no longer authorizes `pending` (or forged `authorized`) sessions. A payment is only authorized after an HMAC-confirmed webhook that fully matches the stored payment reference.
+- Webhooks are correlated with the real Medusa payment session ID (`payses_...`) instead of an artificial `redsys_*` ID, so Medusa's `processPaymentWorkflow` can find the payment/session.
+- Webhook validation now checks order, amount, currency, provider, merchant, terminal and transaction type against the reference stored at `initiatePayment`/`updatePayment` time.
+- A new `redsys_payment_reference` table (created lazily via `pgConnection`) prevents replaying previously confirmed `orderId`s.
+- `generateOrderId()` now uses `node:crypto` `randomInt` instead of `Math.random()`.
+- `getCurrencyNum()` throws on unsupported currencies instead of silently falling back to EUR.
+
+### Fixed
+
+- Webhook `Ds_Amount` (smallest unit, e.g. `"2550"`) is normalized back to the main unit (`25.5`) before being passed to Medusa.
+- Webhook action is `AUTHORIZED` for preauthorizations (tx `1`) and `SUCCESSFUL` for immediate captures (tx `0`).
+- Strict Redsys response-code validation: payment 4-digit codes 0000-0099, confirmation/refund code 900, cancellation code 400.
+- `updatePayment()` generates a fresh `orderId` and keeps MerchantData at a fixed 3-position layout (`cartId|sessionId|orderId`).
+- `refundPayment()` no longer accepts generic `00xx` codes.
+- Storefront flow no longer creates the order before the payment (see `examples/storefront-redsys.md`).
+
 ## [1.0.12] - 2026-05-13
 
 ### Fixed

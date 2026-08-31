@@ -1,15 +1,29 @@
+import { randomInt } from "node:crypto"
+
 /**
- * Generate a unique order ID for Redsys.
- * Redsys requires:
+ * Character set used for the non-numeric part of the Redsys order ID.
+ */
+const ALPHANUMERIC = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+/**
+ * Generates a cryptographically secure Redsys order ID.
+ *
+ * Redsys requirements:
  * - First 4 characters must be digits
- * - Max 12 characters
+ * - Maximum 12 characters
  * - Alphanumeric (digits + uppercase letters)
+ *
+ * The resulting ID always matches `^\d{4}[A-Z0-9]{8}$` (12 characters).
+ * It MUST NOT be used as the Medusa payment session identifier.
  */
 export function generateOrderId(): string {
-  const prefix = String(Math.floor(Math.random() * 9000 + 1000))
-  const suffix = Math.random()
-    .toString(36)
-    .substring(2, 10)
-    .toUpperCase()
-  return (prefix + suffix).substring(0, 12)
+  const prefix = String(randomInt(1000, 10000))
+
+  let suffix = ""
+
+  for (let i = 0; i < 8; i++) {
+    suffix += ALPHANUMERIC[randomInt(0, ALPHANUMERIC.length)]
+  }
+
+  return prefix + suffix
 }
