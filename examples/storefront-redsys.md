@@ -19,7 +19,7 @@ pp_redsys_redsys: {
   title: "Credit / Debit Card",
   icon: <CreditCard />,
 },
-pp_redsys_redsys_bizum: {
+"pp_redsys-bizum_redsys-bizum": {
   title: "Bizum",
   icon: <Smartphone />,
 },
@@ -30,7 +30,7 @@ export const isRedsys = (providerId?: string) => {
 }
 
 export const isRedsysBizum = (providerId?: string) => {
-  return providerId?.startsWith("pp_redsys_redsys_bizum")
+  return providerId?.startsWith("pp_redsys-bizum")
 }
 ```
 

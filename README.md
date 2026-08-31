@@ -122,7 +122,7 @@ Enable the Redsys provider(s) in your Medusa admin panel under **Settings > Regi
 - **Credit/Debit Card**: Select **Redsys** as a payment provider
   - Provider ID: `pp_redsys_redsys`
 - **Bizum**: Select **Redsys Bizum** as a payment provider
-  - Provider ID: `pp_redsys_redsys_bizum`
+  - Provider ID: `pp_redsys-bizum_redsys-bizum`
 
 You can enable one or both providers depending on which payment methods you want to offer.
 
@@ -177,7 +177,7 @@ pp_redsys_redsys: {
   title: "Credit / Debit Card",
   icon: <CreditCard />,
 },
-pp_redsys_redsys_bizum: {
+"pp_redsys-bizum_redsys-bizum": {
   title: "Bizum",
   icon: <Smartphone />,
 },
@@ -188,7 +188,7 @@ export const isRedsys = (providerId?: string) => {
 }
 
 export const isRedsysBizum = (providerId?: string) => {
-  return providerId?.startsWith("pp_redsys_redsys_bizum")
+  return providerId?.startsWith("pp_redsys-bizum")
 }
 ```
 
@@ -249,8 +249,8 @@ The payment session `data` field returned by `initiatePayment`:
 Medusa automatically exposes webhook endpoints for the Redsys providers at:
 
 ```
-/hooks/payment/redsys_redsys        (Card payments)
-/hooks/payment/redsys_redsys_bizum  (Bizum payments)
+/hooks/payment/redsys_redsys                (Card payments)
+/hooks/payment/redsys-bizum_redsys-bizum    (Bizum payments)
 ```
 
 For local development with sandbox, you must expose your backend to the internet (e.g., via [ngrok](https://ngrok.com/)) so Redsys can reach the webhook. Set `notificationUrl` to the ngrok URL.
@@ -388,7 +388,7 @@ MIT — see [LICENSE](./LICENSE) file for details.
 - New `redsys-bizum` provider with `DS_MERCHANT_PAYMETHODS: "z"` parameter
 - Full lifecycle support: initiate, authorize, capture, cancel, refund, webhook
 - Same configuration as card provider (can share credentials)
-- Separate webhook endpoint at `/hooks/payment/redsys_redsys_bizum`
+- Separate webhook endpoint at `/hooks/payment/redsys-bizum_redsys-bizum`
 
 ### v1.0.12 (2026-05-13)
 - **Fixed**: Response code validation for payment authorization (codes 0-99), refunds/confirmations (code 900), cancellations (code 400)
